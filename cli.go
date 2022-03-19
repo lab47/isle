@@ -12,7 +12,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/yalr4m/types"
+	"github.com/lab47/yalr4m/types"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/terminal"
 )
@@ -38,6 +38,7 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 	cfg.HostKeyCallback = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		return nil
 	}
+	cfg.SetDefaults()
 
 	for i := 0; i < 100; i++ {
 		c.L.Info("connecting to unix socket")

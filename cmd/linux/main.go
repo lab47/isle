@@ -17,9 +17,10 @@ import (
 	"github.com/containerd/console"
 	"github.com/docker/distribution/reference"
 	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/yalr4m"
-	"github.com/hashicorp/yalr4m/pkg/vz"
-	"github.com/hashicorp/yalr4m/vm"
+	"github.com/lab47/yalr4m"
+	"github.com/lab47/yalr4m/pkg/ghrelease"
+	"github.com/lab47/yalr4m/pkg/vz"
+	"github.com/lab47/yalr4m/vm"
 	"github.com/spf13/pflag"
 	"golang.org/x/sys/unix"
 )
@@ -94,6 +95,12 @@ func main() {
 	}
 
 	log.Debug("calculate state dir", "dir", stateDir)
+
+	err := setupStateDir(log, stateDir)
+	if err != nil {
+		log.Error("error setting up state", "error", err)
+		os.Exit(1)
+	}
 
 	configPath := filepath.Join(stateDir, "config.json")
 
@@ -214,6 +221,39 @@ func main() {
 	if err != nil {
 		c.L.Error("error starting shell", "error", err)
 	}
+}
+
+func setupStateDir(log hclog.Logger, stateDir string) error {
+	var neededFiles = map[string]struct{}{
+		"initrd":  {},
+		"vmlinux": {},
+		"os.fs":   {},
+	}
+
+	entries, err := os.ReadDir(stateDir)
+	if err == nil {
+		for _, ent := range entries {
+			delete(neededFiles, ent.Name())
+		}
+	}
+
+	if len(neededFiles) == 0 {
+		return nil
+	}
+
+	rel, err := ghrelease.Latest("lab47", "yalr4m")
+	if err != nil {
+		return err
+	}
+
+	for _, asset := range rel.Assets {
+		if strings.HasPrefix(asset.Name, "os-") &&
+			asset.ContentType == "application/x-gtar" {
+			return ghrelease.UnpackAsset(&asset, stateDir)
+		}
+	}
+
+	return fmt.Errorf("release missing os asset: %s", rel.TagName)
 }
 
 func startVM(log hclog.Logger, stateDir, configPath, pidPath string) {

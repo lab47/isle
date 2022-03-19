@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,11 +26,16 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/oci"
+	"github.com/containerd/containerd/snapshots"
+	"github.com/containerd/go-cni"
+	"github.com/containerd/nerdctl/pkg/netutil"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gliderlabs/ssh"
 	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/yalr4m/types"
 	"github.com/hashicorp/yamux"
+	"github.com/lab47/yalr4m/types"
+	"github.com/opencontainers/image-spec/identity"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/xid"
 	"golang.org/x/sys/unix"
@@ -37,11 +43,143 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 )
 
+type runningContainer struct {
+	exit <-chan containerd.ExitStatus
+	pid  int
+}
+
 type Guest struct {
 	L hclog.Logger
 	C *containerd.Client
 
+	User string
+
+	cni       cni.CNI
+	netconfig []*netutil.NetworkConfigList
+
 	mu sync.Mutex
+
+	running map[string]*runningContainer
+}
+
+func (g *Guest) Init() error {
+	g.running = make(map[string]*runningContainer)
+
+	ce := &netutil.CNIEnv{
+		Path:        "/usr/libexec/cni",
+		NetconfPath: "/etc/cni/net.d",
+	}
+
+	ll, err := netutil.ConfigLists(ce)
+	if err != nil {
+		return err
+	}
+
+	g.netconfig = ll
+
+	var netcfg *netutil.NetworkConfigList
+
+	var available []string
+
+	for _, nc := range g.netconfig {
+		available = append(available, nc.Name)
+
+		if nc.Name == "bridge" {
+			netcfg = nc
+			break
+		}
+	}
+
+	if netcfg == nil {
+		return fmt.Errorf("unable to find bridge network")
+	}
+
+	gc, err := cni.New(
+		cni.WithPluginDir([]string{"/usr/libexec/cni"}),
+		cni.WithConfListBytes(netcfg.Bytes),
+	)
+	if err != nil {
+		return err
+	}
+
+	g.cni = gc
+
+	return nil
+}
+
+func (g *Guest) Cleanup(ctx context.Context) {
+	ctx = namespaces.WithNamespace(ctx, "msl")
+
+	snap := g.C.SnapshotService("")
+	defer snap.Close()
+
+	containers, err := g.C.ContainerService().List(ctx)
+	if err != nil {
+		g.L.Error("error listing containers for cleanup", "error", err)
+		return
+	}
+
+	for _, ci := range containers {
+		c, err := g.C.LoadContainer(ctx, ci.ID)
+		if err != nil {
+			continue
+		}
+
+		task, err := c.Task(ctx, nil)
+		if err != nil {
+			continue
+		}
+
+		if rc, ok := g.running[ci.ID]; ok {
+			g.L.Info("removing CNI")
+			err := g.cni.Remove(ctx, ci.ID, fmt.Sprintf("/proc/%d/ns/net", rc.pid))
+			if err != nil {
+				g.L.Error("error removing cni", "id", ci.ID, "error", err)
+			}
+		}
+
+		ch, err := task.Wait(ctx)
+		if err != nil {
+			g.L.Error("error setting up task wait", "error", err)
+			continue
+		}
+
+		err = task.Kill(ctx, unix.SIGTERM)
+		if err != nil {
+			g.L.Error("error killing task", "error", err)
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-ch:
+			// ok
+		}
+
+		_, err = task.Delete(ctx)
+		if err != nil {
+			g.L.Error("error deleting task", "error", err)
+			continue
+		}
+
+		id := xid.New().String()
+
+		labels := map[string]string{"env": ci.ID}
+
+		err = snap.Commit(ctx, id, ci.SnapshotKey, snapshots.WithLabels(labels))
+		if err != nil {
+			g.L.Error("error commiting filesystem", "error", err)
+		}
+
+		g.L.Info("commited snapshot", "snap-id", id, "previous", ci.SnapshotKey)
+
+		err = c.Delete(ctx)
+		if err != nil {
+			g.L.Error("error deleting container", "error", err)
+			continue
+		}
+	}
 }
 
 func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) {
@@ -109,6 +247,39 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 	}
 	g.mu.Unlock()
 
+	volHome := "/vol/user/home/" + g.User
+
+	os.MkdirAll(filepath.Dir(volHome), 0755)
+
+	is := g.C.ImageService()
+
+	var image containerd.Image
+
+	iimg, err := is.Get(ctx, info.Image)
+	if err == nil {
+		g.L.Info("detected image available locally", "image", info.Image)
+		image = containerd.NewImage(g.C, iimg)
+	} else {
+		g.L.Debug("pulling image remotely", "image", info.Image)
+		image, err = g.C.Pull(ctx, info.Image, containerd.WithPullUnpack)
+		if err != nil {
+			g.L.Error("error pulling image", "error", err)
+			fmt.Fprintf(s, "error pulling image: %s\n", err)
+			s.Exit(1)
+			return
+		}
+	}
+
+	snapId, err := g.setupSnapshot(ctx, info.Name, image)
+	if err != nil {
+		g.L.Error("error configuring filesystem", "error", err)
+		fmt.Fprintf(s, "error configuring filesystem: %s\n", err)
+		s.Exit(1)
+		return
+	}
+
+	var rebuild bool
+
 	container, err := g.C.LoadContainer(ctx, info.Name)
 	if err != nil {
 		if !errors.Is(err, errdefs.ErrNotFound) {
@@ -118,21 +289,22 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 			return
 		}
 
-		image, err := g.C.Pull(ctx, info.Image, containerd.WithPullUnpack)
+		rebuild = true
+	} else {
+		task, err = container.Task(ctx, nil)
 		if err != nil {
-			g.L.Error("error pulling image", "error", err)
-			fmt.Fprintf(s, "error pulling image: %s\n", err)
-			s.Exit(1)
-			return
+			g.L.Warn("detected task not around, rebuilding container")
+			err = container.Delete(ctx)
+			rebuild = true
 		}
+	}
 
-		specopts := oci.WithImageConfig(image)
-
+	if rebuild {
 		container, err = g.C.NewContainer(ctx,
 			info.Name,
-			containerd.WithImage(image),
-			containerd.WithNewSnapshot(info.Name, image),
-			containerd.WithNewSpec(specopts,
+			containerd.WithSnapshot(snapId),
+			containerd.WithNewSpec(
+				oci.WithImageConfig(image),
 				oci.WithMounts([]specs.Mount{
 					{
 						Destination: "/share",
@@ -144,6 +316,12 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 						Destination: "/vol",
 						Type:        "bind",
 						Source:      "/vol",
+						Options:     []string{"rbind", "rshared", "rw"},
+					},
+					{
+						Destination: "/home",
+						Type:        "bind",
+						Source:      filepath.Dir(volHome),
 						Options:     []string{"rbind", "rshared", "rw"},
 					},
 					{
@@ -161,7 +339,6 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 				}),
 				oci.WithHostname(info.Name),
 				oci.WithHostResolvconf,
-				oci.WithHostNamespace(specs.NetworkNamespace),
 				oci.WithPrivileged,
 				oci.WithAllDevicesAllowed,
 				oci.WithHostDevices,
@@ -185,8 +362,35 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 			return
 		}
 
+		res, err := g.cni.Setup(ctx, info.Name, fmt.Sprintf("/proc/%d/ns/net", task.Pid()))
+		if err != nil {
+			g.L.Error("error setting up networking", "error", err)
+			fmt.Fprintf(s, "error setting up networking: %s\n", err)
+			s.Exit(1)
+			return
+		}
+
+		g.L.Info("network setup",
+			"dns", res.DNS,
+			"interfaces", spew.Sdump(res.Interfaces),
+			"routes", spew.Sdump(res.Routes),
+		)
+
+		setup := []string{
+			"mkdir -p /etc/sudoers.d",
+			"echo '%user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/00-%user",
+			"echo root:root | chpasswd",
+			"useradd -u 501 -m %user || adduser -u 501 -h /home/%user %user",
+			"echo %user:%user | chpasswd",
+			"ln -s /share/home /home/%user/mac",
+		}
+
+		for i, str := range setup {
+			setup[i] = strings.ReplaceAll(str, "%user", g.User)
+		}
+
 		var setupSp specs.Process
-		setupSp.Args = []string{"/bin/sh", "-c", "mkdir -p /etc/sudoers.d; echo 'evan ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/00-evan; echo root:root | chpasswd; useradd -u 501 -m evan || adduser -u 501 -h /home/evan evan; echo evan:evan | chpasswd"}
+		setupSp.Args = []string{"/bin/sh", "-c", strings.Join(setup, "; ")}
 		setupSp.Env = []string{"PATH=/bin:/sbin:/usr/bin:/usr/sbin"}
 		setupSp.Cwd = "/"
 
@@ -225,27 +429,22 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		}
 
 		task.CloseIO(ctx)
+
+		g.mu.Lock()
+		g.running[info.Name] = &runningContainer{
+			pid: int(task.Pid()),
+		}
+		g.mu.Unlock()
 	}
 
 	id := xid.New().String()
 
 	task, err = container.Task(ctx, nil)
 	if err != nil {
-		if !errors.Is(err, errdefs.ErrNotFound) {
-			g.L.Error("error creating task", "error", err)
-			fmt.Fprintf(s, "error creating task: %s\n", err)
-			s.Exit(1)
-			return
-		}
-
-		g.L.Info("creating new task for container")
-		task, err = container.NewTask(ctx, cio.NullIO)
-		if err != nil {
-			g.L.Error("error creating task", "error", err)
-			fmt.Fprintf(s, "error creating task: %s\n", err)
-			s.Exit(1)
-			return
-		}
+		g.L.Error("error fetching task", "error", err)
+		fmt.Fprintf(s, "error fetching task: %s\n", err)
+		s.Exit(1)
+		return
 	}
 
 	/*
@@ -274,11 +473,12 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 	if !info.AsRoot {
 		sp.User.UID = 501
 		sp.User.GID = 1000
-		sp.User.Username = "evan"
+		sp.User.Username = g.User
 
 		if sp.Cwd == "" {
-			sp.Cwd = "/home/evan"
+			sp.Cwd = "/home/" + g.User
 		}
+
 	} else {
 		if sp.Cwd == "" {
 			sp.Cwd = "/root"
@@ -293,7 +493,7 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		return
 	}
 
-	task.Resize(ctx, uint32(ptyReq.Window.Width), uint32(ptyReq.Window.Height))
+	process.Resize(ctx, uint32(ptyReq.Window.Width), uint32(ptyReq.Window.Height))
 
 	statusC, err := process.Wait(ctx)
 	if err != nil {
@@ -313,7 +513,7 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 	if isPty {
 		go func() {
 			for win := range winCh {
-				task.Resize(ctx, uint32(win.Width), uint32(win.Height))
+				process.Resize(ctx, uint32(win.Width), uint32(win.Height))
 			}
 		}()
 	} else {
@@ -324,11 +524,47 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 	status := <-statusC
 	code, _, _ := status.Result()
 
-	if code != 0 {
-		s.Exit(int(code))
-		return
+	g.L.Info("session has exitted", "code", code)
+
+	s.Exit(int(code))
+}
+
+func (g *Guest) setupSnapshot(ctx context.Context, id string, i containerd.Image) (string, error) {
+	s := g.C.SnapshotService("")
+	defer s.Close()
+
+	var (
+		snapId    string
+		updatedAt time.Time
+	)
+
+	s.Walk(ctx, func(c context.Context, i snapshots.Info) error {
+		if i.Updated.After(updatedAt) {
+			snapId = i.Name
+			updatedAt = i.Updated
+		}
+		return nil
+	}, "labels.env="+id)
+
+	if snapId != "" {
+		return snapId, nil
 	}
 
+	snapId = xid.New().String()
+
+	diffIDs, err := i.RootFS(ctx)
+	if err != nil {
+		return "", err
+	}
+
+	parent := identity.ChainID(diffIDs).String()
+
+	_, err = s.Prepare(ctx, snapId, parent, snapshots.WithLabels(map[string]string{"env": id}))
+	if err != nil {
+		return "", err
+	}
+
+	return snapId, nil
 }
 
 func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
@@ -392,6 +628,11 @@ func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
 	}
 
 	go g.monitorPorts(ctx, l)
+
+	go func() {
+		<-ctx.Done()
+		l.Close()
+	}()
 
 	g.L.Info("starting connection handler")
 	for {
