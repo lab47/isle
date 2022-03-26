@@ -3,6 +3,7 @@ package yalr4m
 import (
 	"encoding/json"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/user"
@@ -12,9 +13,9 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/hashicorp/go-hclog"
+	"github.com/lab47/yalr4m/pkg/crypto/ssh"
+	"github.com/lab47/yalr4m/pkg/crypto/ssh/terminal"
 	"github.com/lab47/yalr4m/types"
-	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/terminal"
 )
 
 type CLI struct {
@@ -42,7 +43,7 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 
 	for i := 0; i < 100; i++ {
 		c.L.Info("connecting to unix socket")
-		conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: c.Path})
+		conn, err := net.Dial("unix", c.Path)
 		if err != nil {
 			time.Sleep(time.Second)
 			continue
@@ -67,6 +68,8 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 	sess.Stdout = stdout
 	sess.Stderr = stdout
 	sess.Stdin = stdin
+
+	setup := sess.Extended(2)
 
 	hostname, err := os.Hostname()
 	if err != nil {
@@ -115,8 +118,11 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 			defer terminal.Restore(int(os.Stdout.Fd()), state)
 		}
 
+		go io.Copy(os.Stderr, setup)
 		err = sess.Shell()
 	} else {
+		go io.Copy(ioutil.Discard, setup)
+
 		c.L.Info("running command", "command", cmd)
 		err = sess.Start(cmd)
 	}
