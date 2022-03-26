@@ -27,16 +27,28 @@ func main() {
 		User: vars["user_name"],
 	}
 
-	err := g.Init()
+	ctx, cancel := signal.NotifyContext(context.Background(),
+		unix.SIGTERM, unix.SIGQUIT, unix.SIGINT,
+	)
+	defer cancel()
+
+	err := g.Init(ctx)
 	if err != nil {
 		g.L.Error("error initializing guest", "error", err)
 		os.Exit(1)
 	}
 
-	ctx, cancel := signal.NotifyContext(context.Background(),
-		unix.SIGTERM, unix.SIGQUIT, unix.SIGINT,
-	)
-	defer cancel()
+	/*
+		ref, err := name.ParseReference("ubuntu")
+		if err != nil {
+			panic(err)
+		}
+
+		err = g.StartContainer(ctx, "ubuntu", ref)
+
+		g.L.Info("started container", "error", err)
+		os.Exit(0)
+	*/
 
 	g.L.Info("detected user name", "name", vars["user_name"])
 

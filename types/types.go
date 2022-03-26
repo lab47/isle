@@ -23,6 +23,7 @@ type HeaderMessage struct {
 
 type PortForwardMessage struct {
 	Port int
+	Key  string
 }
 
 type ShellMessage struct {

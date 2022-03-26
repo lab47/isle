@@ -7,9 +7,9 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/exec"
@@ -20,32 +20,35 @@ import (
 	"sync"
 	"time"
 
+	"github.com/containerd/console"
 	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/cmd/ctr/commands"
-	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/namespaces"
-	"github.com/containerd/containerd/oci"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/go-cni"
-	"github.com/containerd/nerdctl/pkg/netutil"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/fxamacker/cbor/v2"
-	"github.com/gliderlabs/ssh"
+	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
+	"github.com/lab47/yalr4m/pkg/netutil"
+	"github.com/lab47/yalr4m/pkg/reaper"
+	"github.com/lab47/yalr4m/pkg/runc"
+	"github.com/lab47/yalr4m/pkg/ssh"
+	"github.com/lab47/yalr4m/pkg/timesync"
 	"github.com/lab47/yalr4m/types"
 	"github.com/opencontainers/image-spec/identity"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/xid"
 	"golang.org/x/sys/unix"
 
-	gossh "golang.org/x/crypto/ssh"
+	gossh "github.com/lab47/yalr4m/pkg/crypto/ssh"
 )
 
 type runningContainer struct {
-	exit <-chan containerd.ExitStatus
-	pid  int
+	exit   <-chan containerd.ExitStatus
+	pid    int
+	id     string
+	cancel func()
+	doneCh chan error
 }
 
 type Guest struct {
@@ -55,14 +58,24 @@ type Guest struct {
 	User string
 
 	cni       cni.CNI
-	netconfig []*netutil.NetworkConfigList
+	netconfig *netutil.NetworkConfigList
+
+	wg sync.WaitGroup
+
+	bgCtx    context.Context
+	bgCancel func()
+
+	hostAddr string
 
 	mu sync.Mutex
 
 	running map[string]*runningContainer
+	reaper  *reaper.Monitor
+
+	sshAgentPath string
 }
 
-func (g *Guest) Init() error {
+func (g *Guest) Init(ctx context.Context) error {
 	g.running = make(map[string]*runningContainer)
 
 	ce := &netutil.CNIEnv{
@@ -70,44 +83,65 @@ func (g *Guest) Init() error {
 		NetconfPath: "/etc/cni/net.d",
 	}
 
-	ll, err := netutil.ConfigLists(ce)
+	ll, err := netutil.DefaultConfigList(ce)
 	if err != nil {
 		return err
 	}
 
 	g.netconfig = ll
 
-	var netcfg *netutil.NetworkConfigList
-
-	var available []string
-
-	for _, nc := range g.netconfig {
-		available = append(available, nc.Name)
-
-		if nc.Name == "bridge" {
-			netcfg = nc
-			break
-		}
-	}
-
-	if netcfg == nil {
-		return fmt.Errorf("unable to find bridge network")
-	}
-
 	gc, err := cni.New(
 		cni.WithPluginDir([]string{"/usr/libexec/cni"}),
-		cni.WithConfListBytes(netcfg.Bytes),
+		cni.WithConfListBytes(ll.Bytes),
 	)
 	if err != nil {
 		return err
 	}
 
+	g.hostAddr = g.netconfig.Gateway
 	g.cni = gc
+
+	ctx, cancel := context.WithCancel(ctx)
+	g.bgCtx = ctx
+	g.bgCancel = cancel
+
+	g.wg.Add(1)
+	go func() {
+		defer g.wg.Done()
+		StartDNS(ctx, g.L)
+	}()
+
+	err = reaper.SetSubreaper(1)
+	if err != nil {
+		return err
+	}
+
+	g.reaper = reaper.Default
+
+	sigc := make(chan os.Signal, 128)
+	signal.Notify(sigc, unix.SIGCHLD)
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sigc:
+				err := reaper.Reap()
+				if err != nil {
+					g.L.Error("error reaping child processes", "error", err)
+				}
+			}
+		}
+	}()
+
+	g.sshAgentPath = "/run/ssh-agent-host.sock"
 
 	return nil
 }
 
 func (g *Guest) Cleanup(ctx context.Context) {
+	return
 	ctx = namespaces.WithNamespace(ctx, "msl")
 
 	snap := g.C.SnapshotService("")
@@ -180,23 +214,29 @@ func (g *Guest) Cleanup(ctx context.Context) {
 			continue
 		}
 	}
+
+	g.bgCancel()
+	g.wg.Wait()
 }
 
 func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) {
 	g.L.Info("handling ssh")
 
-	x := s.Command()
+	cmdline := s.Command()
 
-	if len(x) == 0 {
-		x = []string{"bash", "-l"}
+	if len(cmdline) == 0 {
+		cmdline = []string{"bash", "-l"}
 	}
 
-	g.L.Info("start ssh session", "command", x)
+	g.L.Info("start ssh session", "command", cmdline)
 
 	var info types.MSLInfo
 
 	sp := &specs.Process{
-		Env: []string{"PATH=/bin:/usr/bin:/sbin:/usr/sbin"},
+		Env: []string{
+			"PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+			"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
+		},
 	}
 
 	for _, str := range s.Environ() {
@@ -229,243 +269,51 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		info.Name = "msl"
 	}
 
-	var task containerd.Task
-
-	g.mu.Lock()
-	if g.C == nil {
-		client, err := containerd.New("/run/containerd/containerd.sock")
-		if err != nil {
-			g.mu.Unlock()
-
-			g.L.Error("error connecting to containerd", "error", err)
-			fmt.Fprintf(s, "error connecting to containerd: %s\n", err)
-			s.Exit(1)
-			return
-		}
-
-		g.C = client
-	}
-	g.mu.Unlock()
-
 	volHome := "/vol/user/home/" + g.User
 
 	os.MkdirAll(filepath.Dir(volHome), 0755)
 
-	is := g.C.ImageService()
-
-	var image containerd.Image
-
-	iimg, err := is.Get(ctx, info.Image)
-	if err == nil {
-		g.L.Info("detected image available locally", "image", info.Image)
-		image = containerd.NewImage(g.C, iimg)
-	} else {
-		g.L.Debug("pulling image remotely", "image", info.Image)
-		image, err = g.C.Pull(ctx, info.Image, containerd.WithPullUnpack)
-		if err != nil {
-			g.L.Error("error pulling image", "error", err)
-			fmt.Fprintf(s, "error pulling image: %s\n", err)
-			s.Exit(1)
-			return
-		}
-	}
-
-	snapId, err := g.setupSnapshot(ctx, info.Name, image)
+	imgref, err := name.ParseReference(info.Image)
 	if err != nil {
-		g.L.Error("error configuring filesystem", "error", err)
-		fmt.Fprintf(s, "error configuring filesystem: %s\n", err)
+		g.L.Error("error parsing image reference", "error", err)
+		fmt.Fprintf(s, "error parsing image reference: %s\n", err)
 		s.Exit(1)
 		return
 	}
-
-	var rebuild bool
-
-	container, err := g.C.LoadContainer(ctx, info.Name)
-	if err != nil {
-		if !errors.Is(err, errdefs.ErrNotFound) {
-			g.L.Error("error loading container", "error", err)
-			fmt.Fprintf(s, "error loading container: %s\n", err)
-			s.Exit(1)
-			return
-		}
-
-		rebuild = true
-	} else {
-		task, err = container.Task(ctx, nil)
-		if err != nil {
-			g.L.Warn("detected task not around, rebuilding container")
-			err = container.Delete(ctx)
-			rebuild = true
-		}
-	}
-
-	if rebuild {
-		container, err = g.C.NewContainer(ctx,
-			info.Name,
-			containerd.WithSnapshot(snapId),
-			containerd.WithNewSpec(
-				oci.WithImageConfig(image),
-				oci.WithMounts([]specs.Mount{
-					{
-						Destination: "/share",
-						Type:        "bind",
-						Source:      "/share",
-						Options:     []string{"rbind", "rshared", "rw"},
-					},
-					{
-						Destination: "/vol",
-						Type:        "bind",
-						Source:      "/vol",
-						Options:     []string{"rbind", "rshared", "rw"},
-					},
-					{
-						Destination: "/home",
-						Type:        "bind",
-						Source:      filepath.Dir(volHome),
-						Options:     []string{"rbind", "rshared", "rw"},
-					},
-					{
-						Destination: "/run/containerd/containerd.sock",
-						Type:        "bind",
-						Source:      "/run/containerd/containerd.sock",
-						Options:     []string{"rbind", "rshared", "rw"},
-					},
-					{
-						Destination: "/var/run/docker.sock",
-						Type:        "bind",
-						Source:      "/var/run/docker.sock",
-						Options:     []string{"rbind", "rshared", "rw"},
-					},
-				}),
-				oci.WithHostname(info.Name),
-				oci.WithHostResolvconf,
-				oci.WithPrivileged,
-				oci.WithAllDevicesAllowed,
-				oci.WithHostDevices,
-				oci.WithNewPrivileges,
-			),
-		)
-
-		if err != nil {
-			g.L.Error("error creating container", "error", err)
-			fmt.Fprintf(s, "error creating container: %s\n", err)
-			s.Exit(1)
-			return
-		}
-
-		g.L.Info("performing setup of container")
-		task, err = container.NewTask(ctx, cio.NullIO)
-		if err != nil {
-			g.L.Error("error creating task", "error", err)
-			fmt.Fprintf(s, "error creating task: %s\n", err)
-			s.Exit(1)
-			return
-		}
-
-		res, err := g.cni.Setup(ctx, info.Name, fmt.Sprintf("/proc/%d/ns/net", task.Pid()))
-		if err != nil {
-			g.L.Error("error setting up networking", "error", err)
-			fmt.Fprintf(s, "error setting up networking: %s\n", err)
-			s.Exit(1)
-			return
-		}
-
-		g.L.Info("network setup",
-			"dns", res.DNS,
-			"interfaces", spew.Sdump(res.Interfaces),
-			"routes", spew.Sdump(res.Routes),
-		)
-
-		setup := []string{
-			"mkdir -p /etc/sudoers.d",
-			"echo '%user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/00-%user",
-			"echo root:root | chpasswd",
-			"useradd -u 501 -m %user || adduser -u 501 -h /home/%user %user",
-			"echo %user:%user | chpasswd",
-			"ln -s /share/home /home/%user/mac",
-		}
-
-		for i, str := range setup {
-			setup[i] = strings.ReplaceAll(str, "%user", g.User)
-		}
-
-		var setupSp specs.Process
-		setupSp.Args = []string{"/bin/sh", "-c", strings.Join(setup, "; ")}
-		setupSp.Env = []string{"PATH=/bin:/sbin:/usr/bin:/usr/sbin"}
-		setupSp.Cwd = "/"
-
-		proc, err := task.Exec(ctx, "setup", &setupSp, cio.LogFile("/var/log/setup"))
-		if err != nil {
-			g.L.Error("error creating task", "error", err)
-			fmt.Fprintf(s, "error creating task: %s\n", err)
-			s.Exit(1)
-			return
-		}
-
-		setupStatus, err := proc.Wait(ctx)
-		if err != nil {
-			g.L.Error("error creating task", "error", err)
-			fmt.Fprintf(s, "error creating task: %s\n", err)
-			s.Exit(1)
-			return
-		}
-
-		err = proc.Start(ctx)
-		if err != nil {
-			g.L.Error("error creating task", "error", err)
-			fmt.Fprintf(s, "error creating task: %s\n", err)
-			s.Exit(1)
-			return
-		}
-
-		exit := <-setupStatus
-
-		err = exit.Error()
-		if err != nil {
-			g.L.Error("error performing container setup", "error", err)
-			fmt.Fprintf(s, "error performing container setup: %s\n", err)
-			s.Exit(int(exit.ExitCode()))
-			return
-		}
-
-		task.CloseIO(ctx)
-
-		g.mu.Lock()
-		g.running[info.Name] = &runningContainer{
-			pid: int(task.Pid()),
-		}
-		g.mu.Unlock()
-	}
-
-	id := xid.New().String()
-
-	task, err = container.Task(ctx, nil)
-	if err != nil {
-		g.L.Error("error fetching task", "error", err)
-		fmt.Fprintf(s, "error fetching task: %s\n", err)
-		s.Exit(1)
-		return
-	}
-
-	/*
-		defer func() {
-			task.Kill(ctx, syscall.SIGTERM)
-			task.Delete(ctx)
-		}()
-	*/
-
-	var taskIO cio.Creator
 
 	ptyReq, winCh, isPty := s.Pty()
 	if isPty {
 		sp.Terminal = true
-		taskIO = cio.NewCreator(cio.WithStreams(s, s, nil), cio.WithTerminal)
 		sp.Env = append(sp.Env, fmt.Sprintf("TERM=%s", ptyReq.Term))
-	} else {
-		taskIO = cio.NewCreator(cio.WithStreams(s, s, s))
 	}
 
-	sp.Args = x
+	var (
+		width int
+		setup io.Writer = ioutil.Discard
+	)
+
+	if isPty {
+		width = ptyReq.Window.Width
+		setup = s.Extended(2)
+	}
+
+	cinfo := ContainerInfo{
+		Name:    info.Name,
+		Img:     imgref,
+		Status:  setup,
+		Width:   width,
+		Session: l,
+	}
+
+	id, err := g.Container(ctx, cinfo)
+	if err != nil {
+		g.L.Error("error establishing container", "error", err)
+		fmt.Fprintf(s, "error establishing container: %s\n", err)
+		s.Exit(1)
+		return
+	}
+
+	sp.Args = cmdline
 	if info.Dir != "" {
 		sp.Cwd = info.Dir
 	}
@@ -485,44 +333,136 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		}
 	}
 
-	process, err := task.Exec(ctx, id, sp, taskIO)
+	r := runc.Runc{
+		Debug: true,
+	}
+
+	consock, err := runc.NewTempConsoleSocket()
 	if err != nil {
-		g.L.Error("error execing task", "error", err)
-		fmt.Fprintf(s, "error execing task: %s\n", err)
+		g.L.Error("error establishing console socket", "error", err)
+		fmt.Fprintf(s, "error establishing console socket: %s\n", err)
 		s.Exit(1)
 		return
 	}
 
-	process.Resize(ctx, uint32(ptyReq.Window.Width), uint32(ptyReq.Window.Height))
+	started := make(chan int, 1)
 
-	statusC, err := process.Wait(ctx)
+	tmpdir, err := ioutil.TempDir("", "yalrm4")
 	if err != nil {
-		g.L.Error("error waiting on process", "error", err)
-		fmt.Fprintf(s, "error waiting on process: %s\n", err)
+		g.L.Error("error creating temp dir", "error", err)
+		fmt.Fprintf(s, "error creating temp dir: %s\n", err)
+		s.Exit(1)
+	}
+
+	defer os.RemoveAll(tmpdir)
+
+	pidPath := filepath.Join(tmpdir, "pid")
+
+	pio, _ := runc.NewSTDIO()
+
+	err = r.Exec(ctx, id, *sp, &runc.ExecOpts{
+		IO:            pio,
+		ConsoleSocket: consock,
+		Detach:        true,
+		Started:       started,
+		PidFile:       pidPath,
+		Terminal:      true,
+	})
+	if err != nil {
+		g.L.Error("error executing command in container", "error", err)
+		fmt.Fprintf(s, "error executing command in container: %s\n", err)
 		s.Exit(1)
 		return
 	}
 
-	if err := process.Start(ctx); err != nil {
-		g.L.Error("error starting process", "error", err)
-		fmt.Fprintf(s, "error staritng process: %s\n", err)
+	select {
+	case <-ctx.Done():
+		err = ctx.Err()
+		g.L.Error("error waiting for exec to start", "error", err)
+		fmt.Fprintf(s, "error waiting for exec to start: %s\n", err)
+		s.Exit(1)
+		return
+	case <-started:
+		// ok
+	}
+
+	g.L.Info("reading process tty")
+
+	con, err := consock.ReceiveMaster()
+	if err != nil {
+		g.L.Error("error setting up terminal", "error", err)
+		fmt.Fprintf(s, "error setting up terminal: %s\n", err)
 		s.Exit(1)
 		return
 	}
+
+	defer con.Close()
+
+	con.Resize(console.WinSize{
+		Height: uint16(ptyReq.Window.Height),
+		Width:  uint16(ptyReq.Window.Width),
+	})
 
 	if isPty {
 		go func() {
 			for win := range winCh {
-				process.Resize(ctx, uint32(win.Width), uint32(win.Height))
+				con.Resize(console.WinSize{
+					Height: uint16(win.Height),
+					Width:  uint16(win.Width),
+				})
 			}
 		}()
-	} else {
-		sigc := commands.ForwardAllSignals(ctx, process)
-		defer commands.StopCatch(sigc)
 	}
 
-	status := <-statusC
-	code, _, _ := status.Result()
+	g.L.Info("reading pid file")
+
+	data, err := ioutil.ReadFile(pidPath)
+	if err != nil {
+		g.L.Error("error reading pid file", "error", err)
+		fmt.Fprintf(s, "error reading pid file: %s\n", err)
+		s.Exit(1)
+		return
+	}
+
+	processPid, err := strconv.Atoi(string(data))
+	if err != nil {
+		g.L.Error("error parsing pid file", "error", err)
+		fmt.Fprintf(s, "error parsing pid file: %s\n", err)
+		s.Exit(1)
+		return
+	}
+
+	ch := g.reaper.Subscribe()
+	defer g.reaper.Unsubscribe(ch)
+
+	go func() {
+		defer con.Close()
+		io.Copy(s, con)
+	}()
+
+	go func() {
+		defer con.Close()
+		io.Copy(con, s)
+	}()
+
+	var exitStatus runc.Exit
+
+	g.L.Info("waiting on exit status")
+
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case exit := <-ch:
+			g.L.Info("exit detected", "pid", exit.Pid, "pidfile", processPid)
+
+			exitStatus = exit
+			break loop
+		}
+	}
+
+	code := exitStatus.Status
 
 	g.L.Info("session has exitted", "code", code)
 
@@ -627,7 +567,9 @@ func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
 		sshServ.SubsystemHandlers[k] = v
 	}
 
-	go g.monitorPorts(ctx, l)
+	os.Remove(g.sshAgentPath)
+
+	go g.forwardSSHAgent(ctx, l)
 
 	go func() {
 		<-ctx.Done()
@@ -642,6 +584,63 @@ func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
 		}
 
 		go g.HandleConn(stream, sshServ)
+	}
+}
+
+func (g *Guest) forwardSSHAgent(ctx context.Context, sess *yamux.Session) {
+	l, err := net.Listen("unix", g.sshAgentPath)
+	if err != nil {
+		g.L.Error("error listening on ssh agent path", "error", err, "path", g.sshAgentPath)
+		return
+	}
+
+	defer l.Close()
+
+	os.Chmod(g.sshAgentPath, 0777)
+
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			return
+		}
+
+		host, err := sess.Open()
+		if err != nil {
+			c.Close()
+			g.L.Error("error opening channel to host", "error", err)
+			continue
+		}
+
+		enc := cbor.NewEncoder(host)
+		enc.Encode(types.HeaderMessage{Kind: "ssh-agent"})
+
+		dec := cbor.NewDecoder(host)
+
+		var resp types.ResponseMessage
+
+		dec.Decode(&resp)
+
+		if resp.Code != types.OK {
+			g.L.Error("error establishing agent connection", "remote-error", types.Error)
+			c.Close()
+			continue
+		}
+
+		g.L.Info("established connection to ssh-agent")
+
+		go func() {
+			defer c.Close()
+			defer host.Close()
+
+			io.Copy(host, c)
+		}()
+
+		go func() {
+			defer c.Close()
+			defer host.Close()
+
+			io.Copy(c, host)
+		}()
 	}
 }
 
@@ -703,7 +702,7 @@ func (g *Guest) handleProtocol(conn net.Conn) {
 			return
 		}
 
-		c, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", pf.Port))
+		c, err := net.Dial("tcp", fmt.Sprintf("%s:%d", pf.Key, pf.Port))
 		if err != nil {
 			enc.Encode(types.ResponseMessage{
 				Code:  types.Error,
@@ -753,10 +752,17 @@ func (g *Guest) handleProtocol(conn net.Conn) {
 		cmd.Stderr = os.Stderr
 
 		cmd.Run()
+
+	case "timesync":
+		enc.Encode(types.ResponseMessage{
+			Code: types.OK,
+		})
+
+		timesync.Guest(g.bgCtx, g.L, conn)
 	}
 }
 
-func (g *Guest) monitorPorts(ctx context.Context, sess *yamux.Session) {
+func (g *Guest) monitorPorts(ctx context.Context, sess *yamux.Session, target string, path string) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -773,17 +779,17 @@ func (g *Guest) monitorPorts(ctx context.Context, sess *yamux.Session) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			g.readPorts(sess, ports)
+			g.readPorts(sess, target, path, ports)
 		case <-sigCh:
-			g.readPorts(sess, ports)
+			g.readPorts(sess, target, path, ports)
 		}
 	}
 }
 
-func (g *Guest) readPorts(sess *yamux.Session, ports map[int64]struct{}) {
-	f, err := os.Open("/proc/net/tcp")
+func (g *Guest) readPorts(sess *yamux.Session, target string, path string, ports map[int64]struct{}) {
+	f, err := os.Open(path)
 	if err != nil {
-		g.L.Error("error reading /proc/net/tcp", "error", err)
+		g.L.Error("error reading tcp listing", "error", err, "path", path)
 		return
 	}
 
@@ -852,7 +858,10 @@ func (g *Guest) readPorts(sess *yamux.Session, ports map[int64]struct{}) {
 			continue
 		}
 
-		err = enc.Encode(types.PortForwardMessage{Port: int(numPort)})
+		err = enc.Encode(types.PortForwardMessage{
+			Port: int(numPort),
+			Key:  target,
+		})
 		if err != nil {
 			g.L.Error("error encoding message to host", "error", err)
 			continue
@@ -898,7 +907,10 @@ func (g *Guest) readPorts(sess *yamux.Session, ports map[int64]struct{}) {
 				continue
 			}
 
-			err = enc.Encode(types.PortForwardMessage{Port: int(p)})
+			err = enc.Encode(types.PortForwardMessage{
+				Port: int(p),
+				Key:  target,
+			})
 			if err != nil {
 				g.L.Error("error encoding message to host", "error", err)
 				continue

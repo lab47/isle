@@ -21,6 +21,7 @@ import (
 	"github.com/lab47/yalr4m/pkg/ghrelease"
 	"github.com/lab47/yalr4m/pkg/vz"
 	"github.com/lab47/yalr4m/vm"
+	"github.com/morikuni/aec"
 	"github.com/spf13/pflag"
 	"golang.org/x/sys/unix"
 )
@@ -216,6 +217,9 @@ func main() {
 		Dir:    *fDir,
 		AsRoot: *fRoot,
 	}
+
+	aec.EraseLine(aec.EraseModes.All)
+	aec.EmptyBuilder.EraseLine(aec.EraseModes.All)
 
 	err = c.Shell(strings.Join(pflag.Args(), " "), os.Stdin, os.Stdout)
 	if err != nil {

@@ -18,9 +18,15 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
+	"github.com/lab47/yalr4m/pkg/timesync"
 	"github.com/lab47/yalr4m/pkg/vz"
 	"github.com/lab47/yalr4m/types"
 )
+
+type portListener struct {
+	net.Listener
+	Key string
+}
 
 type VM struct {
 	L        hclog.Logger
@@ -28,7 +34,7 @@ type VM struct {
 	Config   Config
 
 	mu        sync.Mutex
-	listeners map[int]net.Listener
+	listeners map[int]portListener
 }
 
 type RunningVM struct {
@@ -510,6 +516,7 @@ func (v *VM) startListener(
 				}
 				v.L.Debug("connected yamux to guest")
 
+				go v.timesync(ctx, sess)
 				go v.handleFromGuest(ctx, sess)
 			case c := <-hostCh:
 				if sess == nil {
@@ -532,8 +539,16 @@ func (v *VM) startListener(
 					defer c.Close()
 					defer out.Close()
 
-					go io.Copy(c, out)
-					io.Copy(out, c)
+					_, err := io.Copy(out, c)
+					v.L.Info("closing down bridge 1", "error", err)
+				}()
+
+				go func() {
+					defer c.Close()
+					defer out.Close()
+
+					_, err := io.Copy(c, out)
+					v.L.Info("closing down bridge 2", "error", err)
 				}()
 			case msg := <-ctrlC:
 				v.L.Debug("sending control message")
@@ -587,6 +602,39 @@ func (v *VM) startListener(
 	})
 
 	return listener, nil
+}
+
+func (v *VM) timesync(ctx context.Context, sess *yamux.Session) {
+	for {
+		out, err := sess.Open()
+		if err != nil {
+			v.L.Error("error opening session for control", "error", err)
+			return
+		}
+
+		out.Write([]byte{types.ProtocolByte})
+
+		enc := cbor.NewEncoder(out)
+		dec := cbor.NewDecoder(out)
+
+		enc.Encode(types.HeaderMessage{
+			Kind: "timesync",
+		})
+
+		var resp types.ResponseMessage
+
+		dec.Decode(&resp)
+
+		if resp.Code != types.OK {
+			v.L.Error("error confirming timesync channel", "error", resp.Error)
+			time.Sleep(10 * time.Second)
+			continue
+		}
+
+		v.L.Info("beginning host timesync loop")
+
+		timesync.Host(ctx, v.L, out)
+	}
 }
 
 func (v *VM) handleFromGuest(ctx context.Context, sess *yamux.Session) {
@@ -676,10 +724,10 @@ func (v *VM) handleGuestConn(c *yamux.Stream) {
 
 		v.mu.Lock()
 		if v.listeners == nil {
-			v.listeners = make(map[int]net.Listener)
+			v.listeners = make(map[int]portListener)
 		}
 
-		v.listeners[pm.Port] = l
+		v.listeners[pm.Port] = portListener{Listener: l, Key: pm.Key}
 		v.mu.Unlock()
 
 		err = enc.Encode(resp)
@@ -688,11 +736,58 @@ func (v *VM) handleGuestConn(c *yamux.Stream) {
 		}
 
 		v.L.Debug("setup port forwarder", "port", pm.Port)
-		go v.forwardPort(pm.Port, l, c.Session())
+		go v.forwardPort(pm.Port, pm.Key, l, c.Session())
+	case "ssh-agent":
+
+		path := os.Getenv("SSH_AUTH_SOCK")
+		if path == "" {
+			enc.Encode(types.ResponseMessage{
+				Code:  types.Error,
+				Error: "no local agent",
+			})
+
+			v.L.Error("no SSH_AUTH_SOCK set, rejecting connection")
+			c.Close()
+			return
+		}
+
+		local, err := net.Dial("unix", path)
+		if err != nil {
+			enc.Encode(types.ResponseMessage{
+				Code:  types.Error,
+				Error: "local agent rejected connection",
+			})
+
+			v.L.Error("error connecting to ssh agent", "error", err)
+			c.Close()
+			return
+		}
+
+		v.L.Info("forwarding connection to ssh-agent", "path", path)
+
+		enc.Encode(types.ResponseMessage{
+			Code: types.OK,
+		})
+
+		go func() {
+			defer local.Close()
+			defer c.Close()
+
+			io.Copy(c, local)
+
+			v.L.Info("ssh-agent session ended 1")
+		}()
+
+		defer c.Close()
+		defer local.Close()
+
+		io.Copy(local, c)
+
+		v.L.Info("ssh-agent session ended 2")
 	}
 }
 
-func (v *VM) forwardPort(port int, l net.Listener, sess *yamux.Session) {
+func (v *VM) forwardPort(port int, key string, l net.Listener, sess *yamux.Session) {
 	defer l.Close()
 
 	for {
@@ -720,7 +815,10 @@ func (v *VM) forwardPort(port int, l net.Listener, sess *yamux.Session) {
 			continue
 		}
 
-		err = enc.Encode(types.PortForwardMessage{Port: port})
+		err = enc.Encode(types.PortForwardMessage{
+			Port: port,
+			Key:  key,
+		})
 		if err != nil {
 			v.L.Error("error sending forwarding start message", "error", err)
 			continue
