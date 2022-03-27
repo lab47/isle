@@ -207,11 +207,16 @@ func (g *Guest) StartContainer(
 		filepath.Join(bundlePath, "hosts"),
 		[]byte(fmt.Sprintf(
 			"127.0.0.1\tlocalhost localhost.localdomain %s\n"+
-				"::1\tlocalhost localhost.localdomain %s\n",
+				"::1\tlocalhost localhost.localdomain %s\n"+
+				"192.168.64.1\tmac mac.internal host.internal\n",
 			name, name)), 0644)
 	if err != nil {
 		return err
 	}
+
+	volHome := "/vol/user/home/" + g.User
+
+	os.MkdirAll(filepath.Dir(volHome), 0755)
 
 	s := specs.Spec{
 		Version: "1.0.2-dev",
@@ -301,6 +306,12 @@ func (g *Guest) StartContainer(
 				Destination: "/vol",
 				Type:        "bind",
 				Source:      "/vol",
+				Options:     []string{"rbind", "rshared", "rw"},
+			},
+			{
+				Destination: "/home",
+				Type:        "bind",
+				Source:      "/vol/user/home",
 				Options:     []string{"rbind", "rshared", "rw"},
 			},
 			{

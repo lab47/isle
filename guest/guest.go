@@ -269,10 +269,6 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		info.Name = "msl"
 	}
 
-	volHome := "/vol/user/home/" + g.User
-
-	os.MkdirAll(filepath.Dir(volHome), 0755)
-
 	imgref, err := name.ParseReference(info.Image)
 	if err != nil {
 		g.L.Error("error parsing image reference", "error", err)
@@ -567,6 +563,8 @@ func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
 		sshServ.SubsystemHandlers[k] = v
 	}
 
+	go g.discoverIP(ctx, l)
+
 	os.Remove(g.sshAgentPath)
 
 	go g.forwardSSHAgent(ctx, l)
@@ -641,6 +639,56 @@ func (g *Guest) forwardSSHAgent(ctx context.Context, sess *yamux.Session) {
 
 			io.Copy(c, host)
 		}()
+	}
+}
+
+func (g *Guest) probIP() string {
+	iface, err := net.InterfaceByName("eth0")
+	if err != nil {
+		g.L.Error("error getting iface by name", "error", err)
+		return ""
+	}
+
+	addrs, err := iface.Addrs()
+	if err != nil {
+		g.L.Error("error getting iface addrs", "error", err)
+		return ""
+	}
+	for _, a := range addrs {
+		g.L.Info("considering addr", "addr", a)
+
+		switch a := a.(type) {
+		case *net.IPNet:
+			if a.IP.IsGlobalUnicast() {
+				return a.IP.String()
+			}
+		}
+	}
+
+	return ""
+}
+
+func (g *Guest) discoverIP(ctx context.Context, sess *yamux.Session) {
+	for {
+		ip := g.probIP()
+		if ip != "" {
+			out, err := sess.Open()
+			if err != nil {
+				g.L.Error("error opening yamux session for running", "error", err)
+			} else {
+				defer out.Close()
+				enc := cbor.NewEncoder(out)
+				enc.Encode(types.HeaderMessage{Kind: "running"})
+				enc.Encode(types.RunningMessage{
+					IP: ip,
+				})
+
+				g.L.Info("xmit'd running message", "ip", ip)
+				return
+			}
+		}
+
+		time.Sleep(time.Second)
 	}
 }
 

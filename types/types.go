@@ -26,6 +26,10 @@ type PortForwardMessage struct {
 	Key  string
 }
 
+type RunningMessage struct {
+	IP string
+}
+
 type ShellMessage struct {
 	Command []string
 	Rows    uint16
