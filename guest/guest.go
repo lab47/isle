@@ -141,77 +141,13 @@ func (g *Guest) Init(ctx context.Context) error {
 }
 
 func (g *Guest) Cleanup(ctx context.Context) {
-	return
-	ctx = namespaces.WithNamespace(ctx, "msl")
-
-	snap := g.C.SnapshotService("")
-	defer snap.Close()
-
-	containers, err := g.C.ContainerService().List(ctx)
-	if err != nil {
-		g.L.Error("error listing containers for cleanup", "error", err)
-		return
-	}
-
-	for _, ci := range containers {
-		c, err := g.C.LoadContainer(ctx, ci.ID)
-		if err != nil {
-			continue
-		}
-
-		task, err := c.Task(ctx, nil)
-		if err != nil {
-			continue
-		}
-
-		if rc, ok := g.running[ci.ID]; ok {
-			g.L.Info("removing CNI")
-			err := g.cni.Remove(ctx, ci.ID, fmt.Sprintf("/proc/%d/ns/net", rc.pid))
-			if err != nil {
-				g.L.Error("error removing cni", "id", ci.ID, "error", err)
-			}
-		}
-
-		ch, err := task.Wait(ctx)
-		if err != nil {
-			g.L.Error("error setting up task wait", "error", err)
-			continue
-		}
-
-		err = task.Kill(ctx, unix.SIGTERM)
-		if err != nil {
-			g.L.Error("error killing task", "error", err)
-			continue
-		}
-
+	for _, r := range g.running {
+		r.cancel()
 		select {
+		case <-r.doneCh:
+			// ok
 		case <-ctx.Done():
 			return
-		case <-ch:
-			// ok
-		}
-
-		_, err = task.Delete(ctx)
-		if err != nil {
-			g.L.Error("error deleting task", "error", err)
-			continue
-		}
-
-		id := xid.New().String()
-
-		labels := map[string]string{"env": ci.ID}
-
-		err = snap.Commit(ctx, id, ci.SnapshotKey, snapshots.WithLabels(labels))
-		if err != nil {
-			g.L.Error("error commiting filesystem", "error", err)
-		}
-
-		g.L.Info("commited snapshot", "snap-id", id, "previous", ci.SnapshotKey)
-
-		err = c.Delete(ctx)
-		if err != nil {
-			g.L.Error("error deleting container", "error", err)
-			continue
 		}
 	}
 

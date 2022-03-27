@@ -5,14 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/klauspost/compress/gzip"
-	progressbar "github.com/schollz/progressbar/v3"
+	"github.com/lab47/yalr4m/pkg/progressbar"
+	"github.com/pkg/errors"
 )
 
 type ReleaseAsset struct {
@@ -55,6 +55,33 @@ func Latest(org, repo string) (*Release, error) {
 	return &r, nil
 }
 
+func Find(org, repo, tag string) (*Release, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/releases/tags/%s", org, repo, tag)
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	defer resp.Body.Close()
+
+	var r Release
+
+	err = json.NewDecoder(resp.Body).Decode(&r)
+	if err != nil {
+		return nil, err
+	}
+
+	return &r, nil
+}
+
 func ReadAsset(asset *ReleaseAsset) (io.ReadCloser, error) {
 	req, err := http.NewRequest("GET", asset.URL, nil)
 	if err != nil {
@@ -72,9 +99,20 @@ func ReadAsset(asset *ReleaseAsset) (io.ReadCloser, error) {
 }
 
 func UnpackAsset(asset *ReleaseAsset, dir string) error {
+	r, err := ReadAsset(asset)
+	if err != nil {
+		return err
+	}
+
+	defer r.Close()
+
+	return Unpack(r, asset.Size, asset.Name, dir)
+}
+
+func Unpack(r io.Reader, size int64, name, dir string) error {
 	pb := progressbar.NewOptions64(
-		asset.Size,
-		progressbar.OptionSetDescription(asset.Name),
+		size,
+		progressbar.OptionSetDescription(name),
 		progressbar.OptionSetWriter(os.Stderr),
 		progressbar.OptionShowBytes(true),
 		progressbar.OptionSetWidth(10),
@@ -86,13 +124,6 @@ func UnpackAsset(asset *ReleaseAsset, dir string) error {
 
 	pb.RenderBlank()
 	defer pb.Clear()
-
-	r, err := ReadAsset(asset)
-	if err != nil {
-		return err
-	}
-
-	defer r.Close()
 
 	gr, err := gzip.NewReader(io.TeeReader(r, pb))
 	if err != nil {
@@ -107,6 +138,14 @@ func UnpackAsset(asset *ReleaseAsset, dir string) error {
 			break
 		}
 
+		fi := hdr.FileInfo()
+
+		fm := fi.Mode()
+
+		if !fm.IsRegular() {
+			continue
+		}
+
 		path := filepath.Join(dir, hdr.Name)
 
 		fdir := filepath.Dir(path)
@@ -117,12 +156,12 @@ func UnpackAsset(asset *ReleaseAsset, dir string) error {
 
 		f, err := os.Create(path)
 		if err != nil {
-			return err
+			return errors.Wrapf(err, "attempting to create '%s'", hdr.Name)
 		}
 
 		io.Copy(f, tr)
 
-		f.Chmod(fs.FileMode(hdr.Mode))
+		f.Chmod(fm)
 
 		f.Close()
 	}
