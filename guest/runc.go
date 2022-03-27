@@ -127,8 +127,6 @@ func (g *Guest) StartContainer(
 	name := info.Name
 	status := info.Status
 
-	fmt.Fprintf(status, "Creating %s...\r\n", name)
-
 	bundlePath := filepath.Join(basePath, name)
 	rootFsPath := filepath.Join(bundlePath, "rootfs")
 
