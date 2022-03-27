@@ -22,6 +22,7 @@ import (
 	"github.com/lab47/yalr4m/pkg/ghrelease"
 	"github.com/lab47/yalr4m/pkg/vz"
 	"github.com/lab47/yalr4m/vm"
+	"github.com/mattn/go-isatty"
 	"github.com/morikuni/aec"
 	"github.com/spf13/pflag"
 	"golang.org/x/sys/unix"
@@ -89,14 +90,28 @@ func main() {
 		Level: level,
 	})
 
-	stateDir, err := filepath.Abs(*fStateDir)
-	if err != nil {
-		log.Error("unable to compute state dir", "error", err)
-		os.Exit(1)
+	var (
+		stateDir string
+		err      error
+	)
+
+	if *fStateDir != "" {
+		stateDir, err = filepath.Abs(*fStateDir)
+		if err != nil {
+			log.Error("unable to compute state dir", "error", err)
+			os.Exit(1)
+		}
 	}
 
 	if stateDir == "" {
-		stateDir = os.Getenv("YALR4M_STATE_DIR")
+		dir := os.Getenv("YALR4M_STATE_DIR")
+		if stateDir != "" {
+			stateDir, err = filepath.Abs(dir)
+			if err != nil {
+				log.Error("unable to compute state dir", "error", err)
+				os.Exit(1)
+			}
+		}
 	}
 
 	if stateDir == "" {
@@ -187,14 +202,22 @@ func main() {
 		}
 	}
 
+	isTerm := isatty.IsTerminal(os.Stderr.Fd())
+
 	if autoStart {
+		if isTerm {
+			fmt.Printf("🚨 Starting VM...%s",
+				aec.EmptyBuilder.Column(0).ANSI.String(),
+			)
+		}
+
 		log.Info("autostarting VM in background...")
 		execPath, err := os.Executable()
 		if err != nil {
 			log.Error("unable to calculate executable to start", "error", err)
 		}
 
-		cmd := exec.Command(execPath, "--state-dir="+*fStateDir, "--bg-start")
+		cmd := exec.Command(execPath, "--state-dir="+stateDir, "--bg-start")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
@@ -229,10 +252,8 @@ func main() {
 		Name:   *fName,
 		Dir:    *fDir,
 		AsRoot: *fRoot,
+		IsTerm: isTerm,
 	}
-
-	aec.EraseLine(aec.EraseModes.All)
-	aec.EmptyBuilder.EraseLine(aec.EraseModes.All)
 
 	err = c.Shell(strings.Join(pflag.Args(), " "), os.Stdin, os.Stdout)
 	if err != nil {

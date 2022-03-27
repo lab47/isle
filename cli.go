@@ -2,6 +2,7 @@ package yalr4m
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"github.com/lab47/yalr4m/pkg/crypto/ssh"
 	"github.com/lab47/yalr4m/pkg/crypto/ssh/terminal"
 	"github.com/lab47/yalr4m/types"
+	"github.com/morikuni/aec"
 )
 
 type CLI struct {
@@ -23,6 +25,7 @@ type CLI struct {
 	Image  string
 	Dir    string
 	AsRoot bool
+	IsTerm bool
 
 	L    hclog.Logger
 	Path string
@@ -42,6 +45,12 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 	cfg.SetDefaults()
 
 	for i := 0; i < 100; i++ {
+		if c.IsTerm {
+			fmt.Printf("🐚 Connecting...%s",
+				aec.EmptyBuilder.Column(0).ANSI.String(),
+			)
+		}
+
 		c.L.Info("connecting to unix socket")
 		conn, err := net.Dial("unix", c.Path)
 		if err != nil {
@@ -108,6 +117,10 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
+	}
+
+	if c.IsTerm {
+		fmt.Print(aec.EmptyBuilder.Column(0).EraseLine(aec.EraseModes.All).ANSI.String())
 	}
 
 	if cmd == "" {

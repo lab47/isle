@@ -22,4 +22,5 @@ package-os:
 
 .PHONY: release
 release: package-os build-release
-	zip -j output/linux-$$(go env GOARCH) bin/linux 
+	gon -log-level=info ./gon.hcl
+	mv output/linux.zip output/linux-$$VERSION-$$(go env GOARCH).zip
