@@ -80,7 +80,11 @@ func main() {
 		Level: level,
 	})
 
-	stateDir := *fStateDir
+	stateDir, err := filepath.Abs(*fStateDir)
+	if err != nil {
+		log.Error("unable to compute state dir", "error", err)
+		os.Exit(1)
+	}
 
 	if stateDir == "" {
 		stateDir = os.Getenv("YALR4M_STATE_DIR")
@@ -97,7 +101,7 @@ func main() {
 
 	log.Debug("calculate state dir", "dir", stateDir)
 
-	err := setupStateDir(log, stateDir)
+	err = setupStateDir(log, stateDir)
 	if err != nil {
 		log.Error("error setting up state", "error", err)
 		os.Exit(1)

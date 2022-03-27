@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,10 @@ type VM struct {
 
 	mu        sync.Mutex
 	listeners map[int]portListener
+
+	ownHomeLink    bool
+	linuxHomePath  string
+	linuxMountPath string
 }
 
 type RunningVM struct {
@@ -374,6 +379,8 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 		}
 	}()
 
+	defer v.cleanup()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -440,6 +447,17 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 	// vm.Resume(func(err error) {
 	// 	fmt.Println("in resume:", err)
 	// })
+}
+
+func (v *VM) cleanup() {
+	out, err := exec.Command("umount", v.linuxMountPath).CombinedOutput()
+	if err != nil {
+		v.L.Error("error unmounting guest", "error", err, "output", string(out))
+	}
+
+	if v.ownHomeLink {
+		os.Remove(v.linuxHomePath)
+	}
 }
 
 func (v *VM) startListener(
@@ -678,7 +696,17 @@ func (v *VM) handleGuestConn(c *yamux.Stream) {
 		if err != nil {
 			v.L.Error("error encoding response", "error", err)
 		}
+	case "running":
+		var pm types.RunningMessage
+		err = dec.Decode(&pm)
+		if err != nil {
+			v.L.Error("error decoding port forward message", "error", err)
+			return
+		}
 
+		v.L.Info("detected guest running", "ip", pm.IP)
+
+		v.mountLinux(pm.IP)
 	case "cancel-port-forward":
 		var pm types.PortForwardMessage
 		err = dec.Decode(&pm)
@@ -737,8 +765,8 @@ func (v *VM) handleGuestConn(c *yamux.Stream) {
 
 		v.L.Debug("setup port forwarder", "port", pm.Port)
 		go v.forwardPort(pm.Port, pm.Key, l, c.Session())
-	case "ssh-agent":
 
+	case "ssh-agent":
 		path := os.Getenv("SSH_AUTH_SOCK")
 		if path == "" {
 			enc.Encode(types.ResponseMessage{
@@ -851,5 +879,48 @@ func (v *VM) forwardPort(port int, key string, l net.Listener, sess *yamux.Sessi
 
 			io.Copy(guest, c)
 		}()
+	}
+}
+
+func (v *VM) mountLinux(ip string) {
+	// lazy way to let smbd boot up first
+	time.Sleep(time.Second)
+
+	path := filepath.Join(v.StateDir, "linux")
+
+	os.MkdirAll(path, 0755)
+
+	var mounted bool
+
+	for i := 0; i < 100; i++ {
+		cmd := exec.Command("mount", "-t", "smbfs", fmt.Sprintf("//macstorage:mac@%s/storage", ip), path)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			mounted = true
+			break
+		}
+
+		v.L.Error("unable to mount linux", "error", err, "output", string(out))
+		time.Sleep(time.Second)
+	}
+
+	if !mounted {
+		v.L.Error("error timed out trying to mount guest")
+		return
+	}
+
+	v.linuxMountPath = path
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+
+	homePath := filepath.Join(homeDir, "linux")
+
+	if _, err := os.Stat(homePath); os.IsNotExist(err) {
+		os.Symlink(path, homePath)
+		v.ownHomeLink = true
+		v.linuxHomePath = homePath
 	}
 }
