@@ -71,7 +71,11 @@ func main() {
 	}
 
 	g.L.Info("cleaning up containers")
-	g.Cleanup(context.Background())
+
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	g.Cleanup(ctx)
 }
 
 func handleConn(ctx context.Context, g *guest.Guest, c net.Conn) bool {

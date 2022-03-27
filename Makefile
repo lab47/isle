@@ -1,10 +1,25 @@
 .PHONY: all
-all: build codesign
+all: build
 
 .PHONY: codesign
 codesign:
-	codesign --entitlements linux.entitlements -s - ./bin/linux
+	codesign --entitlements linux.entitlements -s - ./bin/linux || true
 
 .PHONY: build
-build:
+build: codesign
 	go build -o bin/linux ./cmd/linux
+
+.PHONY: build-release
+build-release: compile-release codesign
+
+.PHONY: compile-release
+compile-release:
+	go build -ldflags "-X main.Version=$$VERSION" -o bin/linux ./cmd/linux
+
+.PHONY: package-os
+package-os:
+	tar -C release -czvf output/os-$$VERSION-$$(go env GOARCH).tar.gz .
+
+.PHONY: release
+release: package-os build-release
+	zip -j output/linux-$$(go env GOARCH) bin/linux 

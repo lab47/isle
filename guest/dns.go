@@ -3,7 +3,9 @@ package guest
 import (
 	"context"
 	"strconv"
+	"sync"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/hashicorp/go-hclog"
 	"github.com/miekg/dns"
 )
@@ -15,31 +17,20 @@ type handler struct {
 	client *dns.Client
 
 	conns []*dns.Conn
+
+	configOnce sync.Once
 }
 
-func (this *handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
-	this.L.Info("processing dns request", "question", r.Question[0].String(), "client", w.RemoteAddr())
+func (h *handler) updateConfig() {
+	config, _ := dns.ClientConfigFromFile("/etc/resolv.conf")
 
-	for _, conn := range this.conns {
-		msg, _, err := this.client.ExchangeWithConn(r, conn)
-		if err == nil {
-			if len(msg.Answer) == 0 {
-				this.L.Info("no answer detected")
-			} else {
-				this.L.Info("responding to request", "answer", msg.Answer[0].String())
-			}
-			w.WriteMsg(msg)
-			return
+	if config == nil || len(config.Servers) == 0 {
+		h.L.Warn("no system resolv.conf available, using 8.8.8.8")
+
+		config = &dns.ClientConfig{
+			Servers: []string{"8.8.8.8", "4.2.2.1"},
+			Port:    "53",
 		}
-	}
-
-	this.L.Info("no upstreams could resolve a dns query")
-}
-
-func StartDNS(ctx context.Context, log hclog.Logger) error {
-	config, err := dns.ClientConfigFromFile("/etc/resolv.conf")
-	if err != nil {
-		return err
 	}
 
 	client := &dns.Client{Net: "udp"}
@@ -53,13 +44,58 @@ func StartDNS(ctx context.Context, log hclog.Logger) error {
 		}
 	}
 
-	srv := &dns.Server{Addr: ":" + strconv.Itoa(53), Net: "udp"}
-	srv.Handler = &handler{
-		L:      log,
-		config: config,
-		client: client,
-		conns:  conns,
+	h.config = config
+	h.client = client
+	h.conns = conns
+}
+
+func (h *handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+	h.configOnce.Do(h.updateConfig)
+
+	h.L.Debug("processing dns request", "question", r.Question[0].String(), "client", w.RemoteAddr())
+
+	for _, conn := range h.conns {
+		msg, _, err := h.client.ExchangeWithConn(r, conn)
+		if err == nil {
+			if len(msg.Answer) == 0 {
+				h.L.Debug("no answer detected")
+			} else {
+				h.L.Debug("responding to request", "answer", msg.Answer[0].String())
+			}
+			w.WriteMsg(msg)
+			return
+		}
 	}
+
+	h.L.Warn("no upstreams could resolve a dns query", "query", r.String())
+}
+
+func StartDNS(ctx context.Context, log hclog.Logger) error {
+	h := &handler{
+		L: log,
+	}
+
+	// Pickup any changes to resolv.conf automatically
+	go func() {
+		w, err := fsnotify.NewWatcher()
+		if err != nil {
+			return
+		}
+
+		w.Add("/etc/resolv.conf")
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-w.Events:
+				h.updateConfig()
+			}
+		}
+	}()
+
+	srv := &dns.Server{Addr: ":" + strconv.Itoa(53), Net: "udp"}
+	srv.Handler = h
 
 	go func() {
 		<-ctx.Done()

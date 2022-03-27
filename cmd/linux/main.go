@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -26,7 +27,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var Version = "unknown"
+
 var (
+	fVersion  = pflag.Bool("version", false, "print out the version")
 	fName     = pflag.StringP("name", "n", "", "name of vm to connect to")
 	fImage    = pflag.StringP("image", "i", "ubuntu", "OCI image to load")
 	fDir      = pflag.StringP("dir", "d", "", "directory to start in")
@@ -41,6 +45,11 @@ var (
 
 func main() {
 	pflag.Parse()
+
+	if *fVersion {
+		fmt.Printf("yal4rm version: %s\n", Version)
+		os.Exit(0)
+	}
 
 	if *fBgStart {
 		execPath, err := os.Executable()
@@ -122,8 +131,8 @@ func main() {
 		mac := vz.NewRandomLocallyAdministeredMACAddress()
 
 		enc.Encode(vm.Config{
-			Cores:      2,
-			Memory:     2,
+			Cores:      0,
+			Memory:     0,
 			DataSize:   100,
 			UserSize:   100,
 			MacAddress: mac.String(),
@@ -231,11 +240,14 @@ func main() {
 	}
 }
 
+var assetSuffix = "-" + runtime.GOARCH + ".tar.gz"
+
 func setupStateDir(log hclog.Logger, stateDir string) error {
 	var neededFiles = map[string]struct{}{
 		"initrd":  {},
 		"vmlinux": {},
 		"os.fs":   {},
+		"version": {},
 	}
 
 	entries, err := os.ReadDir(stateDir)
@@ -246,17 +258,68 @@ func setupStateDir(log hclog.Logger, stateDir string) error {
 	}
 
 	if len(neededFiles) == 0 {
-		return nil
+		if Version != "unknown" {
+			data, err := ioutil.ReadFile(filepath.Join(stateDir, "version"))
+			curVersion := strings.TrimSpace(string(data))
+			if err == nil {
+				if Version == curVersion {
+					return nil
+				}
+			}
+
+			log.Warn("current version of state dir does not match CLI, switching version",
+				"current", curVersion, "expected", Version)
+		}
 	}
 
-	rel, err := ghrelease.Latest("lab47", "yalr4m")
-	if err != nil {
-		return err
+	os.MkdirAll(stateDir, 0755)
+
+	if cacheDir := os.Getenv("YALR4M_CACHE_DIR"); cacheDir != "" {
+		name := "os-" + Version + assetSuffix
+
+		path := filepath.Join(cacheDir, name)
+
+		f, err := os.Open(path)
+		if err == nil {
+			log.Info("using cached os bundle", "path", path)
+			defer f.Close()
+
+			ioutil.WriteFile(filepath.Join(stateDir, "version"), []byte(Version), 0644)
+
+			fi, _ := f.Stat()
+
+			size := fi.Size()
+
+			return ghrelease.Unpack(f, size, name, stateDir)
+		}
+	}
+
+	var rel *ghrelease.Release
+
+	if Version == "unknown" || Version == "" {
+		rel, err = ghrelease.Latest("lab47", "yalr4m")
+		if err != nil {
+			return err
+		}
+	} else {
+		rel, err = ghrelease.Find("lab47", "yalr4m", Version)
+		if err != nil {
+			log.Warn("Unable to find github release for configured yal4rm version", "version", Version)
+
+			rel, err = ghrelease.Latest("lab47", "yalr4m")
+			if err != nil {
+				return err
+			}
+
+			log.Warn("Using latest release of yalr4m instead", "version", rel.TagName)
+		}
 	}
 
 	for _, asset := range rel.Assets {
 		if strings.HasPrefix(asset.Name, "os-") &&
+			strings.HasSuffix(asset.Name, assetSuffix) &&
 			asset.ContentType == "application/x-gtar" {
+			ioutil.WriteFile(filepath.Join(stateDir, "version"), []byte(Version), 0644)
 			return ghrelease.UnpackAsset(&asset, stateDir)
 		}
 	}

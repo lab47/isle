@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,7 @@ import (
 	"github.com/lab47/yalr4m/pkg/timesync"
 	"github.com/lab47/yalr4m/pkg/vz"
 	"github.com/lab47/yalr4m/types"
+	"golang.org/x/sys/unix"
 )
 
 type portListener struct {
@@ -51,6 +53,10 @@ type State struct {
 	Running bool
 
 	Info *RunningVM
+}
+
+func systemMemory() (uint64, error) {
+	return unix.SysctlUint64("hw.memsize")
 }
 
 func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) error {
@@ -110,18 +116,28 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 
 	cores := v.Config.Cores
 	if cores == 0 {
-		cores = 1
+		cores = runtime.NumCPU()
 	}
 
 	mem := v.Config.Memory
 	if mem == 0 {
-		mem = 2
+		sysmem, err := systemMemory()
+		if err == nil {
+			mem = int(sysmem / 2)
+		}
 	}
+
+	// If it's a small value, presume it's in gigs.
+	if mem < 1024 {
+		mem *= 1024 * 1024 * 1024
+	}
+
+	v.L.Info("creating virtual machine", "cores", cores, "memory", mem)
 
 	config := vz.NewVirtualMachineConfiguration(
 		bootLoader,
 		uint(cores),
-		uint64(mem)*1024*1024*1024,
+		uint64(mem),
 	)
 
 	vmr, hostw, err := os.Pipe()
