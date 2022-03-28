@@ -19,6 +19,8 @@ lsblk
 openrc
 psutils
 runc
+samba-server
 sntpc
 socat
+tzdata
 wireguard-tools

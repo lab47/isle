@@ -7,6 +7,8 @@ init_KOPT() {
 	eval "set -- $(cat /proc/cmdline 2>/dev/null)"
 	for opt; do
 		case "$opt" in
+			swap=*)
+				eval "KOPT_${opt%%=*}='${opt#*=}'" ;;
 			data=*)
 				eval "KOPT_${opt%%=*}='${opt#*=}'" ;;
 			vol_*=*)
@@ -47,6 +49,16 @@ start() {
 
 		rm -rf /var/lib
 		ln -sf /data/var/lib /var/lib
+
+		echo "Activating swap file on /data"
+		# We do this everytime in case the user changes
+		# the amount of swap. By doing a fallocate then
+		# truncate, we're sure that the file is always the exact
+		# requested size.
+		fallocate -l "${KOPT_swap:-2G}" /data/swap
+		truncate -s "${KOPT_swap:-2G}" /data/swap
+		mkswap /data/swap
+		swapon /data/swap
 	fi
 
 	for i in ${!KOPT_vol_*}; do
