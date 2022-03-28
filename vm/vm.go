@@ -20,6 +20,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
+	"github.com/lab47/yalr4m/pkg/bytesize"
 	"github.com/lab47/yalr4m/pkg/timesync"
 	"github.com/lab47/yalr4m/pkg/vz"
 	"github.com/lab47/yalr4m/types"
@@ -42,6 +43,8 @@ type VM struct {
 	ownHomeLink    bool
 	linuxHomePath  string
 	linuxMountPath string
+
+	mountOnce sync.Once
 }
 
 type RunningVM struct {
@@ -63,24 +66,6 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 	u, err := user.Current()
 	if err != nil {
 		return err
-	}
-
-	kernelCommandLineArguments := []string{
-		// Use the first virtio console device as system console.
-		"console=hvc0",
-		// Stop in the initial ramdisk before attempting to transition to
-		// the root file system.
-		"root=/dev/vda",
-		"acpi=on",
-		"acpi.debug_layer=0x2",
-		"acpi.debug_level=0xffffffff",
-		"overlaytmpfs",
-		"data=/dev/vdb",     // don't love assuming this
-		"vol_user=/dev/vdc", // don't love assuming this
-		"share_home=home",
-		"user_name=" + u.Username,
-		"user_uid=" + u.Uid,
-		"user_gid=" + u.Gid,
 	}
 
 	homedir, err := os.UserHomeDir()
@@ -108,36 +93,85 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 
 	sharePath := homedir
 
+	cores := v.Config.Cores
+	if cores == 0 {
+		cores = runtime.NumCPU()
+	}
+
+	var memInBytes int
+
+	mem := v.Config.Memory
+	if mem != "" {
+		bs, err := bytesize.Parse(mem)
+		if err != nil {
+			return err
+		}
+
+		memInBytes = int(bs.Bytes)
+	} else {
+		sysmem, err := systemMemory()
+		if err == nil {
+			memInBytes = int(sysmem / 2)
+		} else {
+			v.L.Warn("unable to calculate system memory, default to 1GB")
+			memInBytes = 1 * bytesize.Gigabytes
+		}
+	}
+
+	swap := v.Config.Swap
+	if swap != "" {
+		_, err := bytesize.Parse(swap)
+		if err != nil {
+			return err
+		}
+	} else {
+		swapBytes := int(memInBytes / bytesize.Gigabytes)
+		// There are many opinions about how to allocate swap.
+		// It used to be 2x, but most don't do that anymore?
+		// And this is a VM, so we want to be a little conservative
+		// because the user can always set it high if the need later.
+
+		switch {
+		case swapBytes == 0: // under a gig of memory
+			swap = fmt.Sprintf("%dM", memInBytes/bytesize.Megabytes)
+		case swapBytes <= 8: // up to 4GB of ram, have it equal the ram
+			swap = fmt.Sprintf("%dG", memInBytes/bytesize.Gigabytes)
+		default:
+			swap = "8G"
+		}
+	}
+
+	kernelCommandLineArguments := []string{
+		// Use the first virtio console device as system console.
+		"console=hvc0",
+		// Stop in the initial ramdisk before attempting to transition to
+		// the root file system.
+		"root=/dev/vda",
+		"acpi=on",
+		"acpi.debug_layer=0x2",
+		"acpi.debug_level=0xffffffff",
+		"overlaytmpfs",
+		"swap=" + swap,
+		"data=/dev/vdb",     // don't love assuming this
+		"vol_user=/dev/vdc", // don't love assuming this
+		"share_home=home",
+		"user_name=" + u.Username,
+		"user_uid=" + u.Uid,
+		"user_gid=" + u.Gid,
+	}
+
 	bootLoader := vz.NewLinuxBootLoader(
 		vmlinuz,
 		vz.WithCommandLine(strings.Join(kernelCommandLineArguments, " ")),
 		vz.WithInitrd(initrd),
 	)
 
-	cores := v.Config.Cores
-	if cores == 0 {
-		cores = runtime.NumCPU()
-	}
-
-	mem := v.Config.Memory
-	if mem == 0 {
-		sysmem, err := systemMemory()
-		if err == nil {
-			mem = int(sysmem / 2)
-		}
-	}
-
-	// If it's a small value, presume it's in gigs.
-	if mem < 1024 {
-		mem *= 1024 * 1024 * 1024
-	}
-
 	v.L.Info("creating virtual machine", "cores", cores, "memory", mem)
 
 	config := vz.NewVirtualMachineConfiguration(
 		bootLoader,
 		uint(cores),
-		uint64(mem),
+		uint64(memInBytes),
 	)
 
 	vmr, hostw, err := os.Pipe()
@@ -195,7 +229,12 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 	}
 
 	if dataPath != "" {
-		size := int64(v.Config.DataSize) * 1024 * 1024 * 1024
+		bs, err := bytesize.Parse(v.Config.DataSize)
+		if err != nil {
+			return err
+		}
+
+		size := bs.Bytes
 
 		fi, err := os.Stat(dataPath)
 		if err == nil {
@@ -242,7 +281,12 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 	}
 
 	if userPath != "" {
-		size := int64(v.Config.UserSize) * 1024 * 1024 * 1024
+		bs, err := bytesize.Parse(v.Config.UserSize)
+		if err != nil {
+			return err
+		}
+
+		size := bs.Bytes
 
 		fi, err := os.Stat(userPath)
 		if err == nil {
@@ -722,7 +766,9 @@ func (v *VM) handleGuestConn(c *yamux.Stream) {
 
 		v.L.Info("detected guest running", "ip", pm.IP)
 
-		v.mountLinux(pm.IP)
+		v.mountOnce.Do(func() {
+			v.mountLinux(pm.IP)
+		})
 	case "cancel-port-forward":
 		var pm types.PortForwardMessage
 		err = dec.Decode(&pm)

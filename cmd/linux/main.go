@@ -19,6 +19,7 @@ import (
 	"github.com/docker/distribution/reference"
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/yalr4m"
+	"github.com/lab47/yalr4m/pkg/bytesize"
 	"github.com/lab47/yalr4m/pkg/ghrelease"
 	"github.com/lab47/yalr4m/pkg/vz"
 	"github.com/lab47/yalr4m/vm"
@@ -125,35 +126,7 @@ func main() {
 
 	log.Debug("calculate state dir", "dir", stateDir)
 
-	err = setupStateDir(log, stateDir)
-	if err != nil {
-		log.Error("error setting up state", "error", err)
-		os.Exit(1)
-	}
-
 	configPath := filepath.Join(stateDir, "config.json")
-
-	if _, err := os.Stat(configPath); err != nil {
-		f, err := os.Create(configPath)
-		if err != nil {
-			log.Error("error creating default config", "error", err)
-			os.Exit(1)
-		}
-
-		enc := json.NewEncoder(f)
-		enc.SetIndent("", "  ")
-
-		mac := vz.NewRandomLocallyAdministeredMACAddress()
-
-		enc.Encode(vm.Config{
-			Cores:      0,
-			Memory:     0,
-			DataSize:   100,
-			UserSize:   100,
-			MacAddress: mac.String(),
-		})
-		f.Close()
-	}
 
 	if *fConfig {
 		cmd := exec.Command("sh", "-c", fmt.Sprintf("${EDITOR:-vi} %s", configPath))
@@ -179,6 +152,71 @@ func main() {
 
 		unix.Kill(pid, unix.SIGTERM)
 		return
+	}
+
+	err = setupStateDir(log, stateDir)
+	if err != nil {
+		log.Error("error setting up state", "error", err)
+		os.Exit(1)
+	}
+
+	f, err := os.Open(configPath)
+	if err != nil {
+		f, err := os.Create(configPath)
+		if err != nil {
+			log.Error("error creating default config", "error", err)
+			os.Exit(1)
+		}
+
+		enc := json.NewEncoder(f)
+		enc.SetIndent("", "  ")
+
+		mac := vz.NewRandomLocallyAdministeredMACAddress()
+
+		enc.Encode(vm.Config{
+			Cores:      0,
+			DataSize:   "100G",
+			UserSize:   "100G",
+			MacAddress: mac.String(),
+		})
+		f.Close()
+	} else {
+		defer f.Close()
+
+		var cfg vm.Config
+		err = json.NewDecoder(f).Decode(&cfg)
+		if err != nil {
+			log.Error("error parsing config", "error", err)
+			os.Exit(1)
+		}
+
+		if cfg.Memory != "" {
+			_, err := bytesize.Parse(cfg.Memory)
+			if err != nil {
+				log.Error("invalid memory setting specified", "error", err, "value", cfg.Memory)
+				os.Exit(1)
+			}
+		}
+
+		if cfg.Swap != "" {
+			_, err := bytesize.Parse(cfg.Swap)
+			if err != nil {
+				log.Error("invalid swap setting specified", "error", err, "value", cfg.Memory)
+				os.Exit(1)
+			}
+		}
+
+		_, err := bytesize.Parse(cfg.DataSize)
+		if err != nil {
+			log.Error("invalid data size setting specified", "error", err, "value", cfg.Memory)
+			os.Exit(1)
+		}
+
+		_, err = bytesize.Parse(cfg.UserSize)
+		if err != nil {
+			log.Error("invalid user size setting specified", "error", err, "value", cfg.Memory)
+			os.Exit(1)
+		}
 	}
 
 	if *fStart {
@@ -279,18 +317,20 @@ func setupStateDir(log hclog.Logger, stateDir string) error {
 	}
 
 	if len(neededFiles) == 0 {
-		if Version != "unknown" {
-			data, err := ioutil.ReadFile(filepath.Join(stateDir, "version"))
-			curVersion := strings.TrimSpace(string(data))
-			if err == nil {
-				if Version == curVersion {
-					return nil
-				}
-			}
-
-			log.Warn("current version of state dir does not match CLI, switching version",
-				"current", curVersion, "expected", Version)
+		if Version == "unknown" {
+			return nil
 		}
+
+		data, err := ioutil.ReadFile(filepath.Join(stateDir, "version"))
+		curVersion := strings.TrimSpace(string(data))
+		if err == nil {
+			if Version == curVersion {
+				return nil
+			}
+		}
+
+		log.Warn("current version of state dir does not match CLI, switching version",
+			"current", curVersion, "expected", Version)
 	}
 
 	os.MkdirAll(stateDir, 0755)

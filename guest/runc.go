@@ -454,7 +454,7 @@ func (g *Guest) StartContainer(
 		"echo root:root | chpasswd",
 		"id evan || useradd -u 501 -m %user || adduser -u 501 -h /home/%user %user",
 		"echo %user:%user | chpasswd",
-		"stat /home/%user/mac || ln -s /share/home /home/%user/mac",
+		"stat /home/%user/mac || ln -sf /share/home /home/%user/mac",
 	}
 
 	for i, str := range setup {
