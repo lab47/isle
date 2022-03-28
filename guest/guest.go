@@ -385,6 +385,8 @@ loop:
 	for {
 		select {
 		case <-ctx.Done():
+			g.L.Info("context finished waiting for command to finish", "error", ctx.Err())
+			os.Exit(130)
 			return
 		case exit := <-ch:
 			g.L.Info("exit detected", "pid", exit.Pid, "pidfile", processPid)
