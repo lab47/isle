@@ -8,6 +8,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -133,7 +134,7 @@ func (g *Guest) StartContainer(
 	if _, err := os.Stat(rootFsPath); err != nil {
 		rimg, err := remote.Image(info.Img,
 			remote.WithPlatform(v1.Platform{
-				Architecture: "arm64",
+				Architecture: runtime.GOARCH,
 				OS:           "linux",
 			}),
 		)
