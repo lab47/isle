@@ -97,6 +97,7 @@ func (g *Guest) Container(ctx context.Context, info ContainerInfo) (string, erro
 		cancel()
 		return "", ctx.Err()
 	case err := <-errorer:
+		g.L.Error("error booting container", "error", err)
 		cancel()
 		return "", err
 	case id = <-started:
@@ -224,7 +225,7 @@ func (g *Guest) StartContainer(
 				UID: 0,
 				GID: 0,
 			},
-			Args: []string{"bash"},
+			Args: []string{"sh"},
 			Env: []string{
 				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 				"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
