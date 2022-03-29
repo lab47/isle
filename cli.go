@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"os/signal"
 	"os/user"
 	"strconv"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/lab47/yalr4m/pkg/crypto/ssh/terminal"
 	"github.com/lab47/yalr4m/types"
 	"github.com/morikuni/aec"
+	"golang.org/x/sys/unix"
 )
 
 type CLI struct {
@@ -122,6 +124,22 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 	if c.IsTerm {
 		fmt.Print(aec.EmptyBuilder.Column(0).EraseLine(aec.EraseModes.All).ANSI.String())
 	}
+
+	sigWin := make(chan os.Signal, 1)
+
+	go func() {
+		for {
+			select {
+			case <-sigWin:
+				rows, cols, err := pty.Getsize(os.Stdout)
+				if err == nil {
+					sess.WindowChange(rows, cols)
+				}
+			}
+		}
+	}()
+
+	signal.Notify(sigWin, unix.SIGWINCH)
 
 	if cmd == "" {
 		c.L.Info("running shell")

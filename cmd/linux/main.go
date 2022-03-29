@@ -20,6 +20,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/yalr4m"
 	"github.com/lab47/yalr4m/pkg/bytesize"
+	"github.com/lab47/yalr4m/pkg/crypto/ssh"
 	"github.com/lab47/yalr4m/pkg/ghrelease"
 	"github.com/lab47/yalr4m/pkg/vz"
 	"github.com/lab47/yalr4m/vm"
@@ -295,6 +296,9 @@ func main() {
 
 	err = c.Shell(strings.Join(pflag.Args(), " "), os.Stdin, os.Stdout)
 	if err != nil {
+		if ee, ok := err.(*ssh.ExitError); ok {
+			os.Exit(ee.ExitStatus())
+		}
 		c.L.Error("error starting shell", "error", err)
 	}
 }
