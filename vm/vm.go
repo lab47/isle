@@ -148,8 +148,9 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 		// the root file system.
 		"root=/dev/vda",
 		"acpi=on",
-		"acpi.debug_layer=0x2",
-		"acpi.debug_level=0xffffffff",
+		"mitigations=off",
+		// "acpi.debug_layer=0x2",
+		// "acpi.debug_level=0xffffffff",
 		"overlaytmpfs",
 		"swap=" + swap,
 		"data=/dev/vdb",     // don't love assuming this
