@@ -84,6 +84,31 @@ func NewPipeIO(uid, gid int, opts ...IOOpt) (i IO, err error) {
 	return newPipeIO(uid, gid, opts...)
 }
 
+func NewOutputIO() (IO, io.ReadCloser, error) {
+	var (
+		stdout *pipe
+		err    error
+	)
+
+	// cleanup in case of an error
+	defer func() {
+		if err != nil {
+			stdout.Close()
+		}
+	}()
+
+	stdout, err = newPipe()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return &pipeIO{
+		out: stdout,
+		err: stdout,
+	}, stdout.r, nil
+
+}
+
 type pipeIO struct {
 	in  *pipe
 	out *pipe
@@ -224,4 +249,67 @@ func (n *nullIO) Set(c *exec.Cmd) {
 
 func (n *nullIO) CloseAfterStart() error {
 	return n.devNull.Close()
+}
+
+func NewLog(path string) (IO, error) {
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, err
+	}
+
+	return &log{f: f}, nil
+}
+
+type log struct {
+	f *os.File
+}
+
+func (s *log) Close() error {
+	return s.f.Close()
+}
+
+func (s *log) Set(cmd *exec.Cmd) {
+	cmd.Stdout = s.f
+	cmd.Stderr = s.f
+}
+
+func (s *log) Stdin() io.WriteCloser {
+	return nil
+}
+
+func (s *log) Stdout() io.ReadCloser {
+	return nil
+}
+
+func (s *log) Stderr() io.ReadCloser {
+	return nil
+}
+
+func SetOutputIO(w io.Writer) (IO, error) {
+	return &setIO{w: w}, nil
+}
+
+type setIO struct {
+	w io.Writer
+}
+
+func (s *setIO) Close() error {
+	return nil
+}
+
+func (s *setIO) Set(cmd *exec.Cmd) {
+	cmd.Stdout = s.w
+	cmd.Stderr = s.w
+}
+
+func (s *setIO) Stdin() io.WriteCloser {
+	return nil
+}
+
+func (s *setIO) Stdout() io.ReadCloser {
+	return nil
+}
+
+func (s *setIO) Stderr() io.ReadCloser {
+	return nil
 }

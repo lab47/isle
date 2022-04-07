@@ -73,36 +73,47 @@ func GenerateCNIPlugins(driver string, id int, ipam map[string]interface{}, opts
 	return plugins, nil
 }
 
-func GenerateIPAM(driver string, subnetStr, gatewayStr, ipRangeStr string, opts map[string]string) (map[string]interface{}, string, error) {
+func GenerateIPAM(driver string, v4subnet, v6subnet string) (map[string]interface{}, string, string, error) {
 	var (
 		ipamConfig interface{}
-		gw         string
+		gw4, gw6   string
 	)
 
 	switch driver {
 	case "default", "host-local":
-		ipamRange, err := parseIPAMRange(subnetStr, gatewayStr, ipRangeStr)
+		ipamRange, err := parseIPAMRange(v4subnet, "", "")
 		if err != nil {
-			return nil, "", err
+			return nil, "", "", err
+		}
+
+		ipamRange6, err := parseIPAMRange(v6subnet, "", "")
+		if err != nil {
+			return nil, "", "", err
 		}
 
 		ipamConf := newHostLocalIPAMConfig()
 		ipamConf.Routes = []IPAMRoute{
 			{Dst: "0.0.0.0/0"},
+			{Dst: "::/0"},
 		}
-		ipamConf.Ranges = append(ipamConf.Ranges, []IPAMRange{*ipamRange})
+		ipamConf.Ranges = append(ipamConf.Ranges,
+			[]IPAMRange{*ipamRange},
+			[]IPAMRange{*ipamRange6},
+		)
+
 		ipamConfig = ipamConf
 
-		gw = ipamRange.Gateway
+		gw4 = ipamRange.Gateway
+		gw6 = ipamRange6.Gateway
 	default:
-		return nil, "", fmt.Errorf("unsupported ipam driver %q", driver)
+		return nil, "", "", fmt.Errorf("unsupported ipam driver %q", driver)
 	}
 
 	ipam, err := structToMap(ipamConfig)
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
-	return ipam, gw, nil
+	return ipam, gw4, gw6, nil
 }
 
 type NetworkConfigList struct {
@@ -110,7 +121,8 @@ type NetworkConfigList struct {
 	NerdctlID     *int
 	NerdctlLabels *map[string]string
 	File          string
-	Gateway       string
+	GatewayV4     string
+	GatewayV6     string
 }
 
 type CNIEnv struct {
@@ -118,10 +130,16 @@ type CNIEnv struct {
 	NetconfPath string
 }
 
-func DefaultConfigList(e *CNIEnv) (*NetworkConfigList, error) {
-	ipam, gw, _ := GenerateIPAM("default", DefaultCIDR, "", "", nil)
-	plugins, _ := GenerateCNIPlugins(DefaultNetworkName, DefaultID, ipam, nil)
-	return GenerateConfigList(e, nil, DefaultID, DefaultNetworkName, gw, plugins)
+func DefaultConfigList(e *CNIEnv, v6addr string) (*NetworkConfigList, error) {
+	ipam, gw4, gw6, err := GenerateIPAM("default", DefaultCIDR, v6addr)
+	if err != nil {
+		panic(err)
+	}
+	plugins, err := GenerateCNIPlugins(DefaultNetworkName, DefaultID, ipam, nil)
+	if err != nil {
+		panic(err)
+	}
+	return GenerateConfigList(e, nil, DefaultID, DefaultNetworkName, gw4, gw6, plugins)
 }
 
 type cniNetworkConfig struct {
@@ -136,7 +154,7 @@ type cniNetworkConfig struct {
 // GenerateConfigList does not fill "File" field.
 //
 // TODO: enable CNI isolation plugin
-func GenerateConfigList(e *CNIEnv, labels []string, id int, name, gw string, plugins []CNIPlugin) (*NetworkConfigList, error) {
+func GenerateConfigList(e *CNIEnv, labels []string, id int, name, gw4, gw6 string, plugins []CNIPlugin) (*NetworkConfigList, error) {
 	if e == nil || id < 0 || name == "" || len(plugins) == 0 {
 		return nil, errdefs.ErrInvalidArgument
 	}
@@ -183,14 +201,15 @@ func GenerateConfigList(e *CNIEnv, labels []string, id int, name, gw string, plu
 		NerdctlID:         &id,
 		NerdctlLabels:     &labelsMap,
 		File:              "",
-		Gateway:           gw,
+		GatewayV4:         gw4,
+		GatewayV6:         gw6,
 	}, nil
 }
 
 // ConfigLists loads config from dir if dir exists.
 // The result also contains DefaultConfigList
-func ConfigLists(e *CNIEnv) ([]*NetworkConfigList, error) {
-	def, err := DefaultConfigList(e)
+func ConfigLists(e *CNIEnv, v6addr string) ([]*NetworkConfigList, error) {
+	def, err := DefaultConfigList(e, v6addr)
 	if err != nil {
 		return nil, err
 	}

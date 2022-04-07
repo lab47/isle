@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,7 +56,11 @@ type Guest struct {
 	L hclog.Logger
 	C *containerd.Client
 
-	User string
+	User      string
+	ClusterId string
+
+	v6clusterAddr net.IP
+	v6subnetAddr  net.IP
 
 	cni       cni.CNI
 	netconfig *netutil.NetworkConfigList
@@ -70,20 +75,72 @@ type Guest struct {
 	mu sync.Mutex
 
 	running map[string]*runningContainer
-	reaper  *reaper.Monitor
+	apps    map[string]*runningContainer
+
+	reaper *reaper.Monitor
 
 	sshAgentPath string
+
+	adverts Advertisements
+}
+
+func newUniqueId() string {
+	data := make([]byte, 5)
+	io.ReadFull(rand.Reader, data)
+
+	return hex.EncodeToString(data)
 }
 
 func (g *Guest) Init(ctx context.Context) error {
 	g.running = make(map[string]*runningContainer)
+	g.apps = make(map[string]*runningContainer)
+
+	if g.ClusterId == "" {
+		g.L.Warn("using temporary cluster-id, yalr4m CLI upgrade needed!")
+		g.ClusterId = newUniqueId()
+	}
+
+	ip := make(net.IP, net.IPv6len)
+	ip[0] = 0xfd
+
+	data, err := hex.DecodeString(g.ClusterId)
+	if err != nil {
+		return err
+	}
+
+	copy(ip[1:], data)
+
+	g.v6clusterAddr = ip
+
+	g.v6subnetAddr = make(net.IP, net.IPv6len)
+	copy(g.v6subnetAddr, ip)
+
+	subnet, err := ioutil.ReadFile("/data/subnet-id")
+	if err == nil {
+		data, err = hex.DecodeString(strings.TrimSpace(string(subnet)))
+		if err != nil {
+			return err
+		}
+	} else {
+		data = make([]byte, 2)
+		_, err = io.ReadFull(rand.Reader, data)
+		if err != nil {
+			return err
+		}
+
+		ioutil.WriteFile("/data/subnet-id", []byte(hex.EncodeToString(data)), 644)
+	}
+
+	copy(g.v6subnetAddr[6:], data)
 
 	ce := &netutil.CNIEnv{
 		Path:        "/usr/libexec/cni",
 		NetconfPath: "/etc/cni/net.d",
 	}
 
-	ll, err := netutil.DefaultConfigList(ce)
+	v6subnet := g.v6subnetAddr.String() + "/64"
+
+	ll, err := netutil.DefaultConfigList(ce, v6subnet)
 	if err != nil {
 		return err
 	}
@@ -98,7 +155,7 @@ func (g *Guest) Init(ctx context.Context) error {
 		return err
 	}
 
-	g.hostAddr = g.netconfig.Gateway
+	g.hostAddr = g.netconfig.GatewayV4
 	g.cni = gc
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -142,9 +199,25 @@ func (g *Guest) Init(ctx context.Context) error {
 
 func (g *Guest) Cleanup(ctx context.Context) {
 	for _, r := range g.running {
+		g.L.Info("signaling shutdown of container", "id", r.id)
+
 		r.cancel()
 		select {
 		case <-r.doneCh:
+			g.L.Info("container stopped", "id", r.id)
+			// ok
+		case <-ctx.Done():
+			return
+		}
+	}
+
+	for _, r := range g.apps {
+		g.L.Info("signaling shutdown of app", "id", r.id)
+
+		r.cancel()
+		select {
+		case <-r.doneCh:
+			g.L.Info("app stopped", "id", r.id)
 			// ok
 		case <-ctx.Done():
 			return
@@ -237,7 +310,15 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		Session: l,
 	}
 
-	id, err := g.Container(ctx, cinfo)
+	err = g.ociUnpacker(&cinfo)
+	if err != nil {
+		g.L.Error("error configuring unpacker", "error", err)
+		fmt.Fprintf(s, "error configuring unpacker: %s\n", err)
+		s.Exit(1)
+		return
+	}
+
+	id, err := g.Container(ctx, &cinfo)
 	if err != nil {
 		g.L.Error("error establishing container", "error", err)
 		fmt.Fprintf(s, "error establishing container: %s\n", err)
@@ -265,10 +346,6 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		}
 	}
 
-	r := runc.Runc{
-		Debug: true,
-	}
-
 	consock, err := runc.NewTempConsoleSocket()
 	if err != nil {
 		g.L.Error("error establishing console socket", "error", err)
@@ -291,6 +368,8 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 	pidPath := filepath.Join(tmpdir, "pid")
 
 	pio, _ := runc.NewSTDIO()
+
+	var r runc.Runc
 
 	err = r.Exec(ctx, id, *sp, &runc.ExecOpts{
 		IO:            pio,
@@ -511,6 +590,8 @@ func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
 		<-ctx.Done()
 		l.Close()
 	}()
+
+	go g.startApps(ctx)
 
 	g.L.Info("starting connection handler")
 	for {

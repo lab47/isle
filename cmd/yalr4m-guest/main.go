@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/signal"
@@ -17,6 +18,10 @@ import (
 )
 
 func main() {
+	// Be sure that when we turn on forwarding via cni, we don't also
+	// break the ipv6 info we get from the hypervisor
+	ioutil.WriteFile("/proc/sys/net/ipv6/conf/eth0/accept_ra", []byte("2"), 0755)
+
 	vars := kcmdline.CommandLine()
 
 	g := &guest.Guest{
@@ -24,7 +29,8 @@ func main() {
 			Name:  "guest",
 			Level: hclog.Trace,
 		}),
-		User: vars["user_name"],
+		User:      vars["user_name"],
+		ClusterId: vars["cluster_id"],
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(),
