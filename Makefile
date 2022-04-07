@@ -25,5 +25,5 @@ release: build-release
 	gon -log-level=info ./gon.hcl
 	mv output/linux.zip output/linux-$$VERSION-$$(go env GOARCH).zip
 
-os/yalr4m-guest:
-	GOOS=linux go build -o os/yalr4m-guest ./cmd/yalr4m-guest
+os/isle-guest:
+	GOOS=linux go build -o os/isle-guest ./cmd/isle-guest

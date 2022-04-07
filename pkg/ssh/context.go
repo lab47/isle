@@ -6,7 +6,7 @@ import (
 	"net"
 	"sync"
 
-	gossh "github.com/lab47/yalr4m/pkg/crypto/ssh"
+	gossh "github.com/lab47/isle/pkg/crypto/ssh"
 )
 
 // contextKey is a value for use with context.WithValue. It's used as

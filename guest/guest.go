@@ -30,18 +30,18 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
-	"github.com/lab47/yalr4m/pkg/netutil"
-	"github.com/lab47/yalr4m/pkg/reaper"
-	"github.com/lab47/yalr4m/pkg/runc"
-	"github.com/lab47/yalr4m/pkg/ssh"
-	"github.com/lab47/yalr4m/pkg/timesync"
-	"github.com/lab47/yalr4m/types"
+	"github.com/lab47/isle/pkg/netutil"
+	"github.com/lab47/isle/pkg/reaper"
+	"github.com/lab47/isle/pkg/runc"
+	"github.com/lab47/isle/pkg/ssh"
+	"github.com/lab47/isle/pkg/timesync"
+	"github.com/lab47/isle/types"
 	"github.com/opencontainers/image-spec/identity"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/xid"
 	"golang.org/x/sys/unix"
 
-	gossh "github.com/lab47/yalr4m/pkg/crypto/ssh"
+	gossh "github.com/lab47/isle/pkg/crypto/ssh"
 )
 
 type runningContainer struct {
@@ -96,7 +96,7 @@ func (g *Guest) Init(ctx context.Context) error {
 	g.apps = make(map[string]*runningContainer)
 
 	if g.ClusterId == "" {
-		g.L.Warn("using temporary cluster-id, yalr4m CLI upgrade needed!")
+		g.L.Warn("using temporary cluster-id, isle CLI upgrade needed!")
 		g.ClusterId = newUniqueId()
 	}
 

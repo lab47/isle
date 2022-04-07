@@ -5,7 +5,7 @@ import (
 	"crypto/rsa"
 	"encoding/binary"
 
-	"github.com/lab47/yalr4m/pkg/crypto/ssh"
+	"github.com/lab47/isle/pkg/crypto/ssh"
 )
 
 func generateSigner() (ssh.Signer, error) {

@@ -20,10 +20,10 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
-	"github.com/lab47/yalr4m/pkg/bytesize"
-	"github.com/lab47/yalr4m/pkg/timesync"
-	"github.com/lab47/yalr4m/pkg/vz"
-	"github.com/lab47/yalr4m/types"
+	"github.com/lab47/isle/pkg/bytesize"
+	"github.com/lab47/isle/pkg/timesync"
+	"github.com/lab47/isle/pkg/vz"
+	"github.com/lab47/isle/types"
 	"golang.org/x/sys/unix"
 )
 

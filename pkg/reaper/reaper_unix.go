@@ -26,7 +26,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/lab47/yalr4m/pkg/runc"
+	"github.com/lab47/isle/pkg/runc"
 	exec "golang.org/x/sys/execabs"
 	"golang.org/x/sys/unix"
 )

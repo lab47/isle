@@ -4,7 +4,7 @@ import (
 	"crypto/subtle"
 	"net"
 
-	gossh "github.com/lab47/yalr4m/pkg/crypto/ssh"
+	gossh "github.com/lab47/isle/pkg/crypto/ssh"
 )
 
 type Signal string

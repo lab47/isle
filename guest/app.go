@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/lab47/yalr4m/pkg/clog"
-	"github.com/lab47/yalr4m/pkg/runc"
-	"github.com/lab47/yalr4m/pkg/shardconfig"
+	"github.com/lab47/isle/pkg/clog"
+	"github.com/lab47/isle/pkg/runc"
+	"github.com/lab47/isle/pkg/shardconfig"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/xid"
 )

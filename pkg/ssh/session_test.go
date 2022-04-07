@@ -7,7 +7,7 @@ import (
 	"net"
 	"testing"
 
-	gossh "github.com/lab47/yalr4m/pkg/crypto/ssh"
+	gossh "github.com/lab47/isle/pkg/crypto/ssh"
 )
 
 func (srv *Server) serveOnce(l net.Listener) error {

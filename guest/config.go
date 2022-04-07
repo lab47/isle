@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 
 	"github.com/hashicorp/go-getter"
-	"github.com/lab47/yalr4m/pkg/shardconfig"
+	"github.com/lab47/isle/pkg/shardconfig"
 )
 
 func (g *Guest) LoadConfig(ctx context.Context, path string) (*shardconfig.Config, error) {

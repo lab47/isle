@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/klauspost/compress/gzip"
-	"github.com/lab47/yalr4m/pkg/progressbar"
+	"github.com/lab47/isle/pkg/progressbar"
 	"github.com/pkg/errors"
 )
 

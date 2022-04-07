@@ -17,7 +17,7 @@ import (
 	"io"
 	"io/ioutil"
 
-	"github.com/lab47/yalr4m/pkg/crypto/internal/poly1305"
+	"github.com/lab47/isle/pkg/crypto/internal/poly1305"
 	"golang.org/x/crypto/chacha20"
 )
 
