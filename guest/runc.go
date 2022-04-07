@@ -2,10 +2,12 @@ package guest
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -13,12 +15,16 @@ import (
 	"time"
 
 	"github.com/containerd/containerd/archive"
-	"github.com/containerd/go-runc"
+	"github.com/containerd/go-cni"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/hashicorp/yamux"
+	"github.com/lab47/yalr4m/pkg/clog"
 	"github.com/lab47/yalr4m/pkg/progressbar"
+	"github.com/lab47/yalr4m/pkg/runc"
+	"github.com/lab47/yalr4m/pkg/shardconfig"
 	"github.com/rs/xid"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -70,7 +76,7 @@ var perms = []string{
 	"CAP_CHECKPOINT_RESTORE",
 }
 
-func (g *Guest) Container(ctx context.Context, info ContainerInfo) (string, error) {
+func (g *Guest) Container(ctx context.Context, info *ContainerInfo) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 
@@ -86,11 +92,11 @@ func (g *Guest) Container(ctx context.Context, info ContainerInfo) (string, erro
 
 	info.StartCh = started
 
-	go func() {
-		errorer <- g.StartContainer(ctx, info)
-	}()
+	id := xid.New().String()
 
-	var id string
+	go func() {
+		errorer <- g.StartContainer(ctx, info, id)
+	}()
 
 	select {
 	case <-ctx.Done():
@@ -100,7 +106,7 @@ func (g *Guest) Container(ctx context.Context, info ContainerInfo) (string, erro
 		g.L.Error("error booting container", "error", err)
 		cancel()
 		return "", err
-	case id = <-started:
+	case <-started:
 		// ok
 	}
 
@@ -120,19 +126,17 @@ type ContainerInfo struct {
 	Status  io.Writer
 	Width   int
 	Session *yamux.Session
+
+	Unpacker  func(ctx context.Context, path string) error
+	FixupSpec func(sp *specs.Spec) error
+
+	Config *shardconfig.Config
+
+	OCIConfig *v1.Config
 }
 
-func (g *Guest) StartContainer(
-	ctx context.Context,
-	info ContainerInfo,
-) error {
-	name := info.Name
-	status := info.Status
-
-	bundlePath := filepath.Join(basePath, name)
-	rootFsPath := filepath.Join(bundlePath, "rootfs")
-
-	if _, err := os.Stat(rootFsPath); err != nil {
+func (g *Guest) ociUnpacker(info *ContainerInfo) error {
+	info.Unpacker = func(ctx context.Context, rootFsPath string) error {
 		rimg, err := remote.Image(info.Img,
 			remote.WithPlatform(v1.Platform{
 				Architecture: runtime.GOARCH,
@@ -142,6 +146,13 @@ func (g *Guest) StartContainer(
 		if err != nil {
 			return err
 		}
+
+		cfg, err := rimg.ConfigFile()
+		if err != nil {
+			return err
+		}
+
+		info.OCIConfig = &cfg.Config
 
 		err = os.MkdirAll(rootFsPath, 0755)
 		if err != nil {
@@ -165,7 +176,7 @@ func (g *Guest) StartContainer(
 		bar := progressbar.NewOptions64(
 			max,
 			progressbar.OptionSetDescription("Downloading"),
-			progressbar.OptionSetWriter(status),
+			progressbar.OptionSetWriter(info.Status),
 			progressbar.OptionShowBytes(true),
 			progressbar.OptionSetWidth(10),
 			progressbar.OptionSetTerminalWidth(info.Width),
@@ -194,6 +205,49 @@ func (g *Guest) StartContainer(
 		}
 
 		bar.Finish()
+
+		return nil
+	}
+
+	return nil
+}
+
+func (g *Guest) StartContainer(
+	ctx context.Context,
+	info *ContainerInfo,
+	id string,
+) error {
+	name := info.Name
+
+	bundlePath := filepath.Join(basePath, name)
+	rootFsPath := filepath.Join(bundlePath, "rootfs")
+
+	if _, err := os.Stat(rootFsPath); err != nil {
+		err = info.Unpacker(ctx, rootFsPath)
+		if err != nil {
+			return err
+		}
+
+		if info.OCIConfig != nil {
+			f, err := os.Create(filepath.Join(bundlePath, "oci-config.json"))
+			if err != nil {
+				return err
+			}
+
+			json.NewEncoder(f).Encode(info.OCIConfig)
+
+			f.Close()
+		}
+	} else {
+		f, err := os.Open(filepath.Join(bundlePath, "oci-config.json"))
+		if err == nil {
+			var cfg v1.Config
+			json.NewDecoder(f).Decode(&cfg)
+
+			info.OCIConfig = &cfg
+
+			f.Close()
+		}
 	}
 
 	err := ioutil.WriteFile(
@@ -217,6 +271,13 @@ func (g *Guest) StartContainer(
 	volHome := "/vol/user/home/" + g.User
 
 	os.MkdirAll(filepath.Dir(volHome), 0755)
+
+	runDir := filepath.Join("/run", id)
+
+	os.MkdirAll(runDir, 0777)
+	defer os.RemoveAll(runDir)
+
+	os.MkdirAll("/run/share", 0755)
 
 	s := specs.Spec{
 		Version: "1.0.2-dev",
@@ -291,10 +352,22 @@ func (g *Guest) StartContainer(
 				Options:     []string{"nosuid", "noexec", "nodev", "rw"},
 			},
 			{
+				Destination: "/sys/fs/cgroup",
+				Type:        "cgroup2",
+				Source:      "cgroup",
+				Options:     []string{"nosuid", "noexec", "nodev", "rw"},
+			},
+			{
 				Destination: "/run",
-				Type:        "tmpfs",
-				Source:      "tmpfs",
-				Options:     []string{"nosuid", "strictatime", "mode=755", "size=65535k"},
+				Type:        "bind",
+				Source:      runDir,
+				Options:     []string{"rbind", "rshared", "rw"},
+			},
+			{
+				Destination: "/run/share",
+				Type:        "bind",
+				Source:      "/run/share",
+				Options:     []string{"rbind", "rshared", "rw"},
 			},
 			{
 				Destination: "/share",
@@ -369,6 +442,25 @@ func (g *Guest) StartContainer(
 		},
 	}
 
+	for _, ad := range g.adverts.Adverts() {
+		switch ad := ad.(type) {
+		case *AdvertiseRun:
+			s.Mounts = append(s.Mounts, specs.Mount{
+				Destination: filepath.Join("/run", ad.Name),
+				Type:        "bind",
+				Source:      filepath.Join("/run", ad.Source, ad.Name),
+				Options:     []string{"rbind", "rshared", "rw"},
+			})
+		}
+	}
+
+	if info.FixupSpec != nil {
+		err = info.FixupSpec(&s)
+		if err != nil {
+			return err
+		}
+	}
+
 	f, err := os.Create(filepath.Join(bundlePath, "config.json"))
 	if err != nil {
 		return err
@@ -389,11 +481,19 @@ func (g *Guest) StartContainer(
 
 	started := make(chan int, 1)
 
-	id := xid.New().String()
-
 	g.L.Info("creating container", "id", id)
 
-	io, err := runc.NewNullIO()
+	dw, err := clog.NewDirectoryWriter(filepath.Join(bundlePath, "log"), 0, 0)
+	if err != nil {
+		return err
+	}
+
+	logw, err := dw.IOInput(ctx)
+	if err != nil {
+		return err
+	}
+
+	io, err := runc.SetOutputIO(logw)
 	if err != nil {
 		return err
 	}
@@ -422,9 +522,13 @@ func (g *Guest) StartContainer(
 		}
 	}()
 
-	defer r.Delete(ctx, id, &runc.DeleteOpts{
-		Force: true,
-	})
+	defer func() {
+		err := r.Delete(context.Background(), id, &runc.DeleteOpts{
+			Force: true,
+		})
+
+		g.L.Error("deleted container", "id", id, "error", err)
+	}()
 
 	var pid int
 
@@ -439,24 +543,61 @@ func (g *Guest) StartContainer(
 
 	g.L.Info("configuring networking")
 
+	h := sha256.New()
+	h.Write([]byte(info.Name))
+
+	idBytes := h.Sum(nil)
+
+	v6addr := make(net.IP, net.IPv6len)
+	copy(v6addr, g.v6subnetAddr)
+
+	copy(v6addr[8:], idBytes[:8])
+
+	hwaddr := make(net.HardwareAddr, 6)
+	copy(hwaddr, idBytes[2:])
+
+	hwaddr[0] = hwaddr[0] & 0b11111110
+
+	mac := hwaddr.String()
+
+	g.L.Info("assigning container custom ipv6 address", "address", v6addr.String(), "mac", mac)
+
 	netPath := fmt.Sprintf("/proc/%d/ns/net", pid)
 
-	cniResult, err := g.cni.Setup(ctx, id, netPath)
+	cniResult, err := g.cni.Setup(ctx, id, netPath,
+		cni.WithCapability("ips", []string{v6addr.String() + "/64"}),
+		cni.WithCapability("mac", mac),
+	)
 	if err != nil {
 		return err
 	}
 
-	defer g.cni.Remove(ctx, id, netPath)
+	var removedCNI bool
+	defer func() {
+		if removedCNI {
+			return
+		}
 
-	g.L.Info("executing setup")
+		err := g.cni.Remove(ctx, id, netPath)
+		g.L.Error("deleted cni for container", "id", id, "error", err)
+	}()
 
 	setup := []string{
-		"mkdir -p /etc/sudoers.d",
-		"echo '%user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/00-%user",
-		"echo root:root | chpasswd",
-		"id evan || useradd -u 501 -m %user || adduser -u 501 -h /home/%user %user",
-		"echo %user:%user | chpasswd",
-		"stat /home/%user/mac || ln -sf /share/home /home/%user/mac",
+		// We need be sure that /var/run is mapped to /run because
+		// we mount /run under the host's /run so that it can be
+		// accessed by the host.
+		"rm -rf /var/run; ln -s /run /var/run",
+	}
+
+	if info.Config == nil || info.Config.Service == nil {
+		setup = append(setup,
+			"mkdir -p /etc/sudoers.d",
+			"echo '%user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/00-%user",
+			"echo root:root | chpasswd",
+			"id evan || useradd -u 501 -m %user || adduser -u 501 -h /home/%user %user",
+			"echo %user:%user | chpasswd",
+			"stat /home/%user/mac || ln -sf /share/home /home/%user/mac",
+		)
 	}
 
 	for i, str := range setup {
@@ -475,17 +616,33 @@ func (g *Guest) StartContainer(
 		return err
 	}
 
-	var target string
+	spew.Dump(cniResult)
 
-	for _, iface := range cniResult.Interfaces {
-		target = iface.IPConfigs[0].IP.String()
-		break
+	var target, target6 string
+
+	primary, ok := cniResult.Interfaces["eth0"]
+	if !ok {
+		g.L.Info("CNI failed to report an eth0")
+	} else {
+		for _, ipconfig := range primary.IPConfigs {
+			if ipconfig.IP.To4() != nil {
+				target = ipconfig.IP.String()
+			} else {
+				target6 = ipconfig.IP.String()
+			}
+		}
 	}
 
-	path := fmt.Sprintf("/proc/%d/net/tcp", pid)
+	if target == "" {
+		g.L.Info("CNI failed to report an IP, no port mapping enabled")
+	} else {
+		g.L.Info("networking configured", "ipv4", target, "ipv6", target6)
 
-	g.L.Info("monitoring for ports", "path", path, "target", target)
-	go g.monitorPorts(ctx, info.Session, target, path)
+		path := fmt.Sprintf("/proc/%d/net/tcp", pid)
+
+		g.L.Info("monitoring for ports", "path", path, "target", target)
+		go g.monitorPorts(ctx, info.Session, target, path)
+	}
 
 	g.L.Warn("waiting for signal to stop container")
 
@@ -498,6 +655,8 @@ func (g *Guest) StartContainer(
 
 	<-ctx.Done()
 
+	orig := ctx.Err()
+
 	ctx = context.Background()
 
 	g.L.Warn("removing networking")
@@ -505,6 +664,7 @@ func (g *Guest) StartContainer(
 	if err != nil {
 		g.L.Error("error removing networking", "error", err)
 	}
+	removedCNI = true
 
 	g.L.Warn("removing container")
 
@@ -516,5 +676,5 @@ func (g *Guest) StartContainer(
 		g.L.Error("error removing container", "error", err)
 	}
 
-	return nil
+	return orig
 }

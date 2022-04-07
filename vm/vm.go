@@ -156,6 +156,7 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 		"data=/dev/vdb",     // don't love assuming this
 		"vol_user=/dev/vdc", // don't love assuming this
 		"share_home=home",
+		"cluster_id=" + v.Config.ClusterId,
 		"user_name=" + u.Username,
 		"user_uid=" + u.Uid,
 		"user_gid=" + u.Gid,
@@ -542,10 +543,11 @@ func (v *VM) startListener(
 
 	go func() {
 		var (
-			conn   *vz.VirtioSocketConnection
-			wait   chan struct{}
-			sess   *yamux.Session
-			hostCh = make(chan net.Conn)
+			conn      *vz.VirtioSocketConnection
+			wait      chan struct{}
+			sess      *yamux.Session
+			curHostCh chan net.Conn
+			hostCh    = make(chan net.Conn)
 		)
 
 		go func() {
@@ -589,15 +591,16 @@ func (v *VM) startListener(
 				cfg.EnableKeepAlive = true
 				cfg.AcceptBacklog = 10
 
-				sess, err = yamux.Client(conn, cfg)
-				if err != nil {
-					return
-				}
+				sess, _ = yamux.Client(conn, cfg)
 				v.L.Debug("connected yamux to guest")
+
+				// This will make it so now we start to recieve any socket connections
+				// from the CLI
+				curHostCh = hostCh
 
 				go v.timesync(ctx, sess)
 				go v.handleFromGuest(ctx, sess)
-			case c := <-hostCh:
+			case c := <-curHostCh:
 				if sess == nil {
 					v.L.Error("attempted connection to session before started")
 					c.Close()
@@ -609,7 +612,8 @@ func (v *VM) startListener(
 				out, err := sess.Open()
 				if err != nil {
 					v.L.Error("error opening for yamux", "error", err)
-					return
+					c.Close()
+					continue
 				}
 
 				v.L.Info("bridging connection...")
@@ -981,7 +985,7 @@ func (v *VM) mountLinux(ip string) {
 
 	homePath := filepath.Join(homeDir, "linux")
 
-	if _, err := os.Stat(homePath); os.IsNotExist(err) {
+	if _, err := os.Lstat(homePath); os.IsNotExist(err) {
 		os.Symlink(path, homePath)
 		v.ownHomeLink = true
 		v.linuxHomePath = homePath

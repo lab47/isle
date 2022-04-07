@@ -19,10 +19,8 @@ import (
 	"github.com/docker/distribution/reference"
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/yalr4m"
-	"github.com/lab47/yalr4m/pkg/bytesize"
 	"github.com/lab47/yalr4m/pkg/crypto/ssh"
 	"github.com/lab47/yalr4m/pkg/ghrelease"
-	"github.com/lab47/yalr4m/pkg/vz"
 	"github.com/lab47/yalr4m/vm"
 	"github.com/mattn/go-isatty"
 	"github.com/morikuni/aec"
@@ -161,63 +159,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	f, err := os.Open(configPath)
+	err = vm.CheckConfig(log, configPath)
 	if err != nil {
-		f, err := os.Create(configPath)
-		if err != nil {
-			log.Error("error creating default config", "error", err)
-			os.Exit(1)
-		}
-
-		enc := json.NewEncoder(f)
-		enc.SetIndent("", "  ")
-
-		mac := vz.NewRandomLocallyAdministeredMACAddress()
-
-		enc.Encode(vm.Config{
-			Cores:      0,
-			DataSize:   "100G",
-			UserSize:   "100G",
-			MacAddress: mac.String(),
-		})
-		f.Close()
-	} else {
-		defer f.Close()
-
-		var cfg vm.Config
-		err = json.NewDecoder(f).Decode(&cfg)
-		if err != nil {
-			log.Error("error parsing config", "error", err)
-			os.Exit(1)
-		}
-
-		if cfg.Memory != "" {
-			_, err := bytesize.Parse(cfg.Memory)
-			if err != nil {
-				log.Error("invalid memory setting specified", "error", err, "value", cfg.Memory)
-				os.Exit(1)
-			}
-		}
-
-		if cfg.Swap != "" {
-			_, err := bytesize.Parse(cfg.Swap)
-			if err != nil {
-				log.Error("invalid swap setting specified", "error", err, "value", cfg.Memory)
-				os.Exit(1)
-			}
-		}
-
-		_, err := bytesize.Parse(cfg.DataSize)
-		if err != nil {
-			log.Error("invalid data size setting specified", "error", err, "value", cfg.Memory)
-			os.Exit(1)
-		}
-
-		_, err = bytesize.Parse(cfg.UserSize)
-		if err != nil {
-			log.Error("invalid user size setting specified", "error", err, "value", cfg.Memory)
-			os.Exit(1)
-		}
+		log.Error("error checking configuration", "error", err.Error())
+		os.Exit(1)
 	}
 
 	if *fStart {
