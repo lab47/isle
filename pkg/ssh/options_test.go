@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	gossh "github.com/lab47/yalr4m/pkg/crypto/ssh"
+	gossh "github.com/lab47/isle/pkg/crypto/ssh"
 )
 
 func newTestSessionWithOptions(t *testing.T, srv *Server, cfg *gossh.ClientConfig, options ...Option) (*gossh.Session, *gossh.Client, func()) {

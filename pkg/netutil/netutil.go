@@ -288,7 +288,7 @@ func NerdctlLabels(b []byte) *map[string]string {
 }
 
 func GetBridgeName(id int) string {
-	return fmt.Sprintf("yalr4m%d", id)
+	return fmt.Sprintf("isle%d", id)
 }
 
 func parseIPAMRange(subnetStr, gatewayStr, ipRangeStr string) (*IPAMRange, error) {

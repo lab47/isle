@@ -1,6 +1,6 @@
 package ssh
 
-import gossh "github.com/lab47/yalr4m/pkg/crypto/ssh"
+import gossh "github.com/lab47/isle/pkg/crypto/ssh"
 
 // PublicKey is an abstraction of different types of public keys.
 type PublicKey interface {

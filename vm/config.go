@@ -9,8 +9,8 @@ import (
 	"os"
 
 	"github.com/hashicorp/go-hclog"
-	"github.com/lab47/yalr4m/pkg/bytesize"
-	"github.com/lab47/yalr4m/pkg/vz"
+	"github.com/lab47/isle/pkg/bytesize"
+	"github.com/lab47/isle/pkg/vz"
 )
 
 type Config struct {

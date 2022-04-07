@@ -1,4 +1,4 @@
-package yalr4m
+package isle
 
 import (
 	"encoding/json"
@@ -15,9 +15,9 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/hashicorp/go-hclog"
-	"github.com/lab47/yalr4m/pkg/crypto/ssh"
-	"github.com/lab47/yalr4m/pkg/crypto/ssh/terminal"
-	"github.com/lab47/yalr4m/types"
+	"github.com/lab47/isle/pkg/crypto/ssh"
+	"github.com/lab47/isle/pkg/crypto/ssh/terminal"
+	"github.com/lab47/isle/types"
 	"github.com/morikuni/aec"
 	"golang.org/x/sys/unix"
 )

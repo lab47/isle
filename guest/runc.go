@@ -21,10 +21,10 @@ import (
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/hashicorp/yamux"
-	"github.com/lab47/yalr4m/pkg/clog"
-	"github.com/lab47/yalr4m/pkg/progressbar"
-	"github.com/lab47/yalr4m/pkg/runc"
-	"github.com/lab47/yalr4m/pkg/shardconfig"
+	"github.com/lab47/isle/pkg/clog"
+	"github.com/lab47/isle/pkg/progressbar"
+	"github.com/lab47/isle/pkg/runc"
+	"github.com/lab47/isle/pkg/shardconfig"
 	"github.com/rs/xid"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -421,7 +421,7 @@ func (g *Guest) StartContainer(
 					},
 				},
 			},
-			CgroupsPath: "/yalr4m/" + name,
+			CgroupsPath: "/isle/" + name,
 			Namespaces: []specs.LinuxNamespace{
 				{
 					Type: "pid",

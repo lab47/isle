@@ -1,4 +1,4 @@
-module github.com/lab47/yalr4m
+module github.com/lab47/isle
 
 go 1.17
 

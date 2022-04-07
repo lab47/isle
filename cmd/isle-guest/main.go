@@ -11,8 +11,8 @@ import (
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
-	"github.com/lab47/yalr4m/guest"
-	"github.com/lab47/yalr4m/pkg/kcmdline"
+	"github.com/lab47/isle/guest"
+	"github.com/lab47/isle/pkg/kcmdline"
 	"github.com/mdlayher/vsock"
 	"golang.org/x/sys/unix"
 )

@@ -3,7 +3,7 @@ package ssh
 import (
 	"io/ioutil"
 
-	gossh "github.com/lab47/yalr4m/pkg/crypto/ssh"
+	gossh "github.com/lab47/isle/pkg/crypto/ssh"
 )
 
 // PasswordAuth returns a functional option that sets PasswordHandler on the server.

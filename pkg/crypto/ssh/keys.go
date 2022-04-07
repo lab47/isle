@@ -26,7 +26,7 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/lab47/yalr4m/pkg/crypto/ssh/internal/bcrypt_pbkdf"
+	"github.com/lab47/isle/pkg/crypto/ssh/internal/bcrypt_pbkdf"
 	"golang.org/x/crypto/ed25519"
 )
 

@@ -18,10 +18,10 @@ import (
 	"github.com/containerd/console"
 	"github.com/docker/distribution/reference"
 	"github.com/hashicorp/go-hclog"
-	"github.com/lab47/yalr4m"
-	"github.com/lab47/yalr4m/pkg/crypto/ssh"
-	"github.com/lab47/yalr4m/pkg/ghrelease"
-	"github.com/lab47/yalr4m/vm"
+	"github.com/lab47/isle"
+	"github.com/lab47/isle/pkg/crypto/ssh"
+	"github.com/lab47/isle/pkg/ghrelease"
+	"github.com/lab47/isle/vm"
 	"github.com/mattn/go-isatty"
 	"github.com/morikuni/aec"
 	"github.com/spf13/pflag"
@@ -36,11 +36,11 @@ var (
 	fImage    = pflag.StringP("image", "i", "ubuntu", "OCI image to load")
 	fDir      = pflag.StringP("dir", "d", "", "directory to start in")
 	fRoot     = pflag.Bool("as-root", false, "establish the shell as root")
-	fStateDir = pflag.String("state-dir", "", "directory that yalr4m stores state in")
+	fStateDir = pflag.String("state-dir", "", "directory that isle stores state in")
 	fVerbose  = pflag.CountP("verbose", "V", "how verbose to be in output")
 	fStart    = pflag.Bool("start", false, "explicitly start VM")
 	fBgStart  = pflag.Bool("bg-start", false, "used to start vm in background")
-	fConfig   = pflag.Bool("configure", false, "configure yalr4m")
+	fConfig   = pflag.Bool("configure", false, "configure isle")
 	fStop     = pflag.Bool("stop", false, "stop the background VM")
 )
 
@@ -104,7 +104,7 @@ func main() {
 	}
 
 	if stateDir == "" {
-		dir := os.Getenv("YALR4M_STATE_DIR")
+		dir := os.Getenv("ISLE_STATE_DIR")
 		if stateDir != "" {
 			stateDir, err = filepath.Abs(dir)
 			if err != nil {
@@ -120,7 +120,13 @@ func main() {
 			panic(err)
 		}
 
-		stateDir = filepath.Join(dir, "yalr4m")
+		stateDir = filepath.Join(dir, "isle")
+
+		// Migrate for older releases
+		oldStateDir := filepath.Join(dir, "yalr4m")
+		if _, err := os.Stat(oldStateDir); err == nil {
+			os.Rename(oldStateDir, stateDir)
+		}
 	}
 
 	log.Debug("calculate state dir", "dir", stateDir)
@@ -229,7 +235,7 @@ func main() {
 		*fName = fam
 	}
 
-	c := &yalr4m.CLI{
+	c := &isle.CLI{
 		L:      log,
 		Path:   path,
 		Image:  named.String(),
@@ -284,7 +290,7 @@ func setupStateDir(log hclog.Logger, stateDir string) error {
 
 	os.MkdirAll(stateDir, 0755)
 
-	if cacheDir := os.Getenv("YALR4M_CACHE_DIR"); cacheDir != "" {
+	if cacheDir := os.Getenv("ISLE_CACHE_DIR"); cacheDir != "" {
 		name := "os-" + Version + assetSuffix
 
 		path := filepath.Join(cacheDir, name)
@@ -307,21 +313,21 @@ func setupStateDir(log hclog.Logger, stateDir string) error {
 	var rel *ghrelease.Release
 
 	if Version == "unknown" || Version == "" {
-		rel, err = ghrelease.Latest("lab47", "yalr4m")
+		rel, err = ghrelease.Latest("lab47", "isle")
 		if err != nil {
 			return err
 		}
 	} else {
-		rel, err = ghrelease.Find("lab47", "yalr4m", Version)
+		rel, err = ghrelease.Find("lab47", "isle", Version)
 		if err != nil {
 			log.Warn("Unable to find github release for configured yal4rm version", "version", Version)
 
-			rel, err = ghrelease.Latest("lab47", "yalr4m")
+			rel, err = ghrelease.Latest("lab47", "isle")
 			if err != nil {
 				return err
 			}
 
-			log.Warn("Using latest release of yalr4m instead", "version", rel.TagName)
+			log.Warn("Using latest release of isle instead", "version", rel.TagName)
 		}
 	}
 
