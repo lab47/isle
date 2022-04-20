@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+package dev.lab47.isle.guestapi;
+
+option go_package = "lab47.dev/isle/guestapi";
+
+service GuestAPI {
+  rpc AddApp(AddAppReq) returns (AddAppResp);
+  rpc DisableApp(DisableAppReq) returns (DisableAppResp);
+}
+
+message AddAppReq {
+  string name = 1;
+  string selector = 2;
+}
+
+message AddAppResp {
+  string id = 1;
+}
+
+message DisableAppReq {
+  string id = 1;
+}
+
+message DisableAppResp {
+}
+

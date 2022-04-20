@@ -2,24 +2,136 @@ package guest
 
 import (
 	"context"
-	"errors"
 	"io/ioutil"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/lab47/isle/pkg/clog"
 	"github.com/lab47/isle/pkg/runc"
 	"github.com/lab47/isle/pkg/shardconfig"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/pkg/errors"
 	"github.com/rs/xid"
 )
 
-func (g *Guest) startApps(ctx context.Context) {
-	root := "/run/apps"
+func (g *Guest) monitorAppsDir(ctx context.Context) {
+	g.startAppsDir(ctx)
+
+	root := "/data/apps/running"
+	os.MkdirAll(root, 0755)
+
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		g.L.Error("unable to create fs watcher", "err", err)
+		return
+	}
+
+	defer w.Close()
+
+	w.Add(root)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-w.Events:
+			switch ev.Op {
+			case fsnotify.Create, fsnotify.Rename:
+				g.startApp(ctx, ev.Name)
+			case fsnotify.Remove:
+				g.removeApp(ctx, ev.Name)
+			}
+		}
+	}
+}
+
+func (g *Guest) validateApp(ctx context.Context, path string) error {
+	_, err := g.LoadConfig(ctx, path)
+	if err != nil {
+		return errors.Wrapf(err, "invalid app configuration")
+	}
+
+	return nil
+}
+
+func (g *Guest) startApp(ctx context.Context, appPath string) {
+	if _, ok := g.detectedApps[appPath]; ok {
+		g.L.Debug("already running app, skipping", "path", appPath)
+		return
+	}
+
+	id := xid.New().String()
+
+	g.L.Info("starting app", "id", id, "path", appPath)
+
+	cfg, err := g.LoadConfig(ctx, appPath)
+	if err != nil {
+		g.L.Error("error loading app config", "error", err)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+
+	doneCh := make(chan error)
+
+	g.apps[cfg.Name] = &runningContainer{
+		id:     id,
+		cancel: cancel,
+		doneCh: doneCh,
+	}
+
+	g.detectedApps[appPath] = cfg.Name
+
+	go func() {
+		defer close(doneCh)
+
+		err = g.MonitorApp(ctx, appPath, cfg, id)
+		if err != nil {
+			if err != context.Canceled {
+				g.L.Error("error starting app", "error", err, "path", appPath)
+			}
+		}
+
+		doneCh <- err
+	}()
+
+}
+
+func (g *Guest) removeApp(ctx context.Context, appPath string) {
+	name, ok := g.detectedApps[appPath]
+	if !ok {
+		g.L.Warn("attempted to remove unknown app", "path", appPath)
+		return
+	}
+
+	rc, ok := g.apps[name]
+	if !ok {
+		g.L.Warn("no configuration for app found", "name", name)
+		return
+	}
+
+	rc.cancel()
+
+	select {
+	case <-ctx.Done():
+		return
+	case <-rc.doneCh:
+		return
+	}
+}
+
+func (g *Guest) startAppsDir(ctx context.Context) {
+	if g.detectedApps == nil {
+		g.detectedApps = map[string]string{}
+	}
+
+	root := "/data/apps/running"
+	os.MkdirAll(root, 0755)
+
 	entries, err := ioutil.ReadDir(root)
 	if err != nil {
 		g.L.Error("error reading apps", "error", err)
@@ -28,39 +140,7 @@ func (g *Guest) startApps(ctx context.Context) {
 
 	for _, ent := range entries {
 		appPath := filepath.Join(root, ent.Name())
-
-		id := xid.New().String()
-
-		g.L.Info("starting app", "id", id, "path", appPath)
-
-		cfg, err := g.LoadConfig(ctx, appPath)
-		if err != nil {
-			g.L.Error("error loading app config", "error", err)
-			continue
-		}
-
-		ctx, cancel := context.WithCancel(ctx)
-
-		doneCh := make(chan error)
-
-		g.apps[cfg.Name] = &runningContainer{
-			id:     id,
-			cancel: cancel,
-			doneCh: doneCh,
-		}
-
-		go func() {
-			defer close(doneCh)
-
-			err = g.MonitorApp(ctx, appPath, cfg, id)
-			if err != nil {
-				if err != context.Canceled {
-					g.L.Error("error starting app", "error", err, "path", appPath)
-				}
-			}
-
-			doneCh <- err
-		}()
+		g.startApp(ctx, appPath)
 	}
 }
 
@@ -136,6 +216,8 @@ func (g *Guest) StartApp(ctx context.Context, path string, cfg *shardconfig.Conf
 
 	select {
 	case <-ctx.Done():
+		// Wait for the sub-goroutine to finish
+		<-errorer
 		return ctx.Err()
 	case err := <-errorer:
 		g.L.Error("error booting container", "error", err)
@@ -195,7 +277,7 @@ func (g *Guest) runApp(ctx context.Context, bundlePath string, info ContainerInf
 
 	sp := &specs.Process{
 		Env: []string{
-			"PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin",
+			"PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/run/share/bin:/run/share/sbin",
 			"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
 		},
 	}
@@ -274,16 +356,6 @@ func (g *Guest) runApp(ctx context.Context, bundlePath string, info ContainerInf
 		}
 
 		for _, gp := range ad.Paths {
-			fromHost := filepath.Join(bundlePath, "rootfs", gp.Path)
-
-			fi, err := os.Stat(fromHost)
-			if err != nil {
-				g.L.Error("error checking path for advertisement",
-					"error", err,
-					"path", gp.Path)
-				continue
-			}
-
 			path := filepath.Join("/run", "share", gp.Into, gp.Name)
 
 			if _, err := os.Stat(path); err == nil {
@@ -291,44 +363,25 @@ func (g *Guest) runApp(ctx context.Context, bundlePath string, info ContainerInf
 				continue
 			}
 
-			g.L.Info("mapping advertised path", "from", fromHost, "to", path)
-
 			err = os.MkdirAll(filepath.Dir(path), 0755)
 			if err != nil {
 				g.L.Error("error creating shared dir", "dir", filepath.Base(path))
 				continue
 			}
 
-			// mount requires that the target exist, even if it's for a file
-			if fi.IsDir() {
-				err = os.Mkdir(path, 0755)
-			} else {
-				err = ioutil.WriteFile(path, nil, 0755)
-			}
+			varName := filepath.Join("/var/isle-containers", info.Name, "rootfs", gp.Path)
+			g.L.Info("mapping advertised path", "from", varName, "to", path)
 
+			err = os.Symlink(varName, path)
 			if err != nil {
-				g.L.Error("error creating target path", "error", err, "path", path)
-				continue
-			}
-
-			cmd := exec.Command("mount", "--bind", fromHost, path)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stderr
-
-			err = cmd.Run()
-			if err != nil {
-				g.L.Error("error bind mounting into shared", "name", gp.Name, "path", gp.Path)
+				g.L.Error("error symlinking into shared", "name", gp.Name, "path", gp.Path)
 				continue
 			}
 
 			defer func() {
-				cmd := exec.Command("umount", path)
-				cmd.Stdout = os.Stdout
-				cmd.Stderr = os.Stderr
-
-				err = cmd.Run()
+				err := os.Remove(path)
 				if err != nil {
-					g.L.Error("error unmounting shared path", "path", path)
+					g.L.Error("error removing shared path", "path", path)
 				} else {
 					os.RemoveAll(path)
 				}

@@ -46,6 +46,11 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 	}
 	cfg.SetDefaults()
 
+	var (
+		conn net.Conn
+		err  error
+	)
+
 	for i := 0; i < 100; i++ {
 		if c.IsTerm {
 			fmt.Printf("🐚 Connecting...%s",
@@ -53,9 +58,21 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 			)
 		}
 
-		c.L.Info("connecting to unix socket")
-		conn, err := net.Dial("unix", c.Path)
+		c.L.Info("connecting to local socket")
+		addr, err := ioutil.ReadFile(c.Path)
 		if err != nil {
+			return err
+		}
+
+		conn, err = net.Dial("tcp", strings.TrimSpace(string(addr)))
+		/*
+			conn, err = net.DialUnix("unix", nil, &net.UnixAddr{
+				Name: c.Path,
+				Net:  "unix",
+			})
+		*/
+		if err != nil {
+			c.L.Error("error connecting to unixsocket", "error", err)
 			time.Sleep(time.Second)
 			continue
 		}
@@ -64,6 +81,7 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 
 		sc, chans, reqs, err = ssh.NewClientConn(conn, "vsock", &cfg)
 		if err != nil {
+			c.L.Debug("issue negotiating ssh connection, trying again")
 			conn.Close()
 			time.Sleep(time.Second)
 			continue
@@ -71,6 +89,8 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 
 		break
 	}
+
+	c.L.Info("connect via ssh", "remote-addr", conn.RemoteAddr())
 
 	sconn := ssh.NewClient(sc, chans, reqs)
 

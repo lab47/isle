@@ -215,10 +215,10 @@ func main() {
 		time.Sleep(3 * time.Second)
 	}
 
-	path := filepath.Join(stateDir, "control.sock")
+	path := filepath.Join(stateDir, "listen-addr")
 	_, err = os.Stat(path)
 	if err != nil {
-		log.Error("error validating state, missing control socket", "error", err)
+		log.Error("error validating state, missing listen-addr", "error", err)
 		os.Exit(1)
 	}
 

@@ -39,6 +39,7 @@ import (
 	"github.com/opencontainers/image-spec/identity"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/xid"
+	"go.etcd.io/bbolt"
 	"golang.org/x/sys/unix"
 
 	gossh "github.com/lab47/isle/pkg/crypto/ssh"
@@ -74,14 +75,17 @@ type Guest struct {
 
 	mu sync.Mutex
 
-	running map[string]*runningContainer
-	apps    map[string]*runningContainer
+	running      map[string]*runningContainer
+	apps         map[string]*runningContainer
+	detectedApps map[string]string
 
 	reaper *reaper.Monitor
 
 	sshAgentPath string
 
 	adverts Advertisements
+
+	db *bbolt.DB
 }
 
 func newUniqueId() string {
@@ -92,6 +96,11 @@ func newUniqueId() string {
 }
 
 func (g *Guest) Init(ctx context.Context) error {
+	err := g.openDB()
+	if err != nil {
+		return err
+	}
+
 	g.running = make(map[string]*runningContainer)
 	g.apps = make(map[string]*runningContainer)
 
@@ -115,7 +124,9 @@ func (g *Guest) Init(ctx context.Context) error {
 	g.v6subnetAddr = make(net.IP, net.IPv6len)
 	copy(g.v6subnetAddr, ip)
 
-	subnet, err := ioutil.ReadFile("/data/subnet-id")
+	var subnet string
+
+	err = g.getVar("subnet-id", &subnet)
 	if err == nil {
 		data, err = hex.DecodeString(strings.TrimSpace(string(subnet)))
 		if err != nil {
@@ -128,7 +139,12 @@ func (g *Guest) Init(ctx context.Context) error {
 			return err
 		}
 
-		ioutil.WriteFile("/data/subnet-id", []byte(hex.EncodeToString(data)), 644)
+		subnet = hex.EncodeToString(data)
+
+		err = g.setVar("subnet-id", subnet)
+		if err != nil {
+			return err
+		}
 	}
 
 	copy(g.v6subnetAddr[6:], data)
@@ -243,7 +259,7 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 
 	sp := &specs.Process{
 		Env: []string{
-			"PATH=/bin:/usr/bin:/sbin:/usr/sbin",
+			"PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/run/share/bin:/run/share/sbin",
 			"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
 		},
 	}
@@ -465,13 +481,15 @@ loop:
 		select {
 		case <-ctx.Done():
 			g.L.Info("context finished waiting for command to finish", "error", ctx.Err())
-			os.Exit(130)
+			s.Exit(130)
 			return
 		case exit := <-ch:
 			g.L.Info("exit detected", "pid", exit.Pid, "pidfile", processPid)
 
-			exitStatus = exit
-			break loop
+			if exit.Pid == processPid {
+				exitStatus = exit
+				break loop
+			}
 		}
 	}
 
@@ -525,15 +543,10 @@ func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
 
 	var key *rsa.PrivateKey
 
-	f, err := os.Open("/data/ssh.key")
+	var data []byte
+
+	err := g.getVar("ssh-key", &data)
 	if err == nil {
-		data, err := io.ReadAll(f)
-		if err != nil {
-			return err
-		}
-
-		f.Close()
-
 		key, _ = x509.ParsePKCS1PrivateKey(data)
 	}
 
@@ -543,10 +556,9 @@ func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
 			return err
 		}
 
-		f, err := os.Create("/data/ssh.key")
-		if err == nil {
-			f.Write(x509.MarshalPKCS1PrivateKey(key))
-			f.Close()
+		err = g.setVar("ssh-key", x509.MarshalPKCS1PrivateKey(key))
+		if err != nil {
+			return err
 		}
 	}
 
@@ -584,14 +596,21 @@ func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
 
 	os.Remove(g.sshAgentPath)
 
-	go g.forwardSSHAgent(ctx, l)
+	agentListener, err := net.Listen("unix", g.sshAgentPath)
+	if err != nil {
+		g.L.Error("error listening on ssh agent path", "error", err, "path", g.sshAgentPath)
+	}
+
+	go g.forwardSSHAgent(ctx, l, agentListener)
 
 	go func() {
 		<-ctx.Done()
 		l.Close()
 	}()
 
-	go g.startApps(ctx)
+	go g.monitorAppsDir(ctx)
+
+	go g.startAPI(ctx)
 
 	g.L.Info("starting connection handler")
 	for {
@@ -604,13 +623,7 @@ func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
 	}
 }
 
-func (g *Guest) forwardSSHAgent(ctx context.Context, sess *yamux.Session) {
-	l, err := net.Listen("unix", g.sshAgentPath)
-	if err != nil {
-		g.L.Error("error listening on ssh agent path", "error", err, "path", g.sshAgentPath)
-		return
-	}
-
+func (g *Guest) forwardSSHAgent(ctx context.Context, sess *yamux.Session, l net.Listener) {
 	defer l.Close()
 
 	os.Chmod(g.sshAgentPath, 0777)
