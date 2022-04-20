@@ -15,6 +15,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/rs/xid"
 	"golang.org/x/sys/unix"
 )
@@ -263,6 +264,7 @@ func (v *VirtioSocketConnection) Write(b []byte) (n int, err error) { return v.f
 
 // Close will be called when caused something error in socket.
 func (v *VirtioSocketConnection) Close() error {
+	hclog.L().Info("closing vsock", "fd", v.fileDescriptor)
 	return v.file.Close()
 }
 

@@ -1,7 +1,5 @@
 #!/sbin/openrc-run
 
-# The first boot init service
-
 # read kernel options
 init_KOPT() {
 	eval "set -- $(cat /proc/cmdline 2>/dev/null)"

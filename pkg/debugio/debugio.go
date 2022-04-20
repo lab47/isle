@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
 	"strings"
 )
 
@@ -48,12 +49,30 @@ func (s *showNet) Read(b []byte) (int, error) {
 	fmt.Printf("data read (%d):\r\n%s\r\n", n,
 		strings.Replace(hex.Dump(b[:n]), "\n", "\r\n", -1))
 
+	fmt.Printf("error: %s\n", err)
+	if err != nil {
+		debug.PrintStack()
+	}
+
 	return n, err
 }
 
 func (s *showNet) Write(b []byte) (int, error) {
-	fmt.Printf("data write:\n")
-	hex.Dump(b)
+	n, err := s.Conn.Write(b)
 
-	return s.Conn.Write(b)
+	fmt.Printf("data write (%d):\r\n%s\r\n", n,
+		strings.Replace(hex.Dump(b), "\n", "\r\n", -1))
+
+	fmt.Printf("error: %s\n", err)
+	if err != nil {
+		debug.PrintStack()
+	}
+
+	return n, err
+}
+
+func (s *showNet) Close() error {
+	fmt.Printf("closing net!\n")
+	debug.PrintStack()
+	return s.Conn.Close()
 }

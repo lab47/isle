@@ -12,12 +12,18 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
 	"github.com/lab47/isle/guest"
+	"github.com/lab47/isle/helper"
 	"github.com/lab47/isle/pkg/kcmdline"
 	"github.com/mdlayher/vsock"
 	"golang.org/x/sys/unix"
 )
 
 func main() {
+	if len(os.Args) >= 2 && os.Args[1] == "--helper" {
+		helper.Main(os.Args[2:])
+		return
+	}
+
 	// Be sure that when we turn on forwarding via cni, we don't also
 	// break the ipv6 info we get from the hypervisor
 	ioutil.WriteFile("/proc/sys/net/ipv6/conf/eth0/accept_ra", []byte("2"), 0755)

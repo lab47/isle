@@ -115,3 +115,55 @@ func Load(path string, options ...Option) (*Config, error) {
 
 	return &cfg, nil
 }
+
+func Decode(name string, data []byte, options ...Option) (*Config, error) {
+	var (
+		o   opts
+		cfg Config
+	)
+
+	for _, f := range options {
+		f(&o)
+	}
+
+	if o.platform == "" {
+		o.platform = runtime.GOARCH
+	}
+
+	var ctx hcl.EvalContext
+
+	ctx.Functions = map[string]function.Function{
+		"for_platform": function.New(&function.Spec{
+			Params: []function.Parameter{
+				{
+					Name: "map",
+					Type: cty.Map(cty.DynamicPseudoType),
+				},
+			},
+			Type: function.StaticReturnType(cty.DynamicPseudoType),
+			Impl: func(args []cty.Value, retType cty.Type) (cty.Value, error) {
+				for k, v := range args[0].AsValueMap() {
+					if k == o.platform {
+						return v, nil
+					}
+				}
+
+				return cty.NilVal, nil
+			},
+		}),
+	}
+
+	ctx.Variables = map[string]cty.Value{
+		"arm64": cty.StringVal("arm64"),
+		"amd64": cty.StringVal("amd64"),
+	}
+
+	err := hclsimple.Decode("app.hcl", data, &ctx, &cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg.Name = name
+
+	return &cfg, nil
+}

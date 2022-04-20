@@ -529,10 +529,19 @@ func (v *VM) startListener(
 	socketPath := filepath.Join(v.StateDir, "control.sock")
 	os.Remove(socketPath)
 
-	l, err := net.Listen("unix", socketPath)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
 	}
+
+	f, err := os.Create(filepath.Join(v.StateDir, "listen-addr"))
+	if err != nil {
+		return nil, err
+	}
+
+	fmt.Fprintln(f, l.Addr().String())
+
+	f.Close()
 
 	type newConn struct {
 		conn *vz.VirtioSocketConnection
@@ -553,6 +562,8 @@ func (v *VM) startListener(
 		go func() {
 			defer l.Close()
 
+			v.L.Info("listening for new sockets on host", "addr", l.Addr())
+
 			for {
 				c, err := l.Accept()
 				if err != nil {
@@ -561,10 +572,11 @@ func (v *VM) startListener(
 							continue
 						}
 					}
+					v.L.Error("error accepting new sockets", "error", err)
 					return
 				}
 
-				v.L.Debug("accepted new client on host side")
+				v.L.Debug("accepted new client on host side", "addr", c.RemoteAddr())
 
 				hostCh <- c
 			}
@@ -607,7 +619,7 @@ func (v *VM) startListener(
 					continue
 				}
 
-				v.L.Info("starting bridge...")
+				v.L.Info("starting bridge...", "conn", c.RemoteAddr())
 
 				out, err := sess.Open()
 				if err != nil {

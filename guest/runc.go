@@ -16,7 +16,6 @@ import (
 
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/go-cni"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -25,6 +24,7 @@ import (
 	"github.com/lab47/isle/pkg/progressbar"
 	"github.com/lab47/isle/pkg/runc"
 	"github.com/lab47/isle/pkg/shardconfig"
+	"github.com/pkg/errors"
 	"github.com/rs/xid"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -286,7 +286,7 @@ func (g *Guest) StartContainer(
 				UID: 0,
 				GID: 0,
 			},
-			Args: []string{"sh"},
+			Args: []string{"/dev/init"},
 			Env: []string{
 				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 				"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
@@ -370,6 +370,18 @@ func (g *Guest) StartContainer(
 				Options:     []string{"rbind", "rshared", "rw"},
 			},
 			{
+				Destination: "/var/global-run",
+				Type:        "bind",
+				Source:      "/run",
+				Options:     []string{"rbind", "rshared", "rw"},
+			},
+			{
+				Destination: "/var/isle-containers",
+				Type:        "bind",
+				Source:      "/data/containers",
+				Options:     []string{"rbind", "rshared", "ro"},
+			},
+			{
 				Destination: "/share",
 				Type:        "bind",
 				Source:      "/share",
@@ -411,6 +423,18 @@ func (g *Guest) StartContainer(
 				Source:      g.sshAgentPath,
 				Options:     []string{"rbind", "rw"},
 			},
+			{
+				Destination: "/dev/init",
+				Type:        "bind",
+				Source:      "/usr/bin/isle-helper",
+				Options:     []string{"rbind", "rshared", "ro"},
+			},
+			{
+				Destination: "/bin/isle",
+				Type:        "bind",
+				Source:      "/usr/bin/isle-helper",
+				Options:     []string{"rbind", "rshared", "ro"},
+			},
 		},
 		Linux: &specs.Linux{
 			Resources: &specs.LinuxResources{
@@ -440,18 +464,6 @@ func (g *Guest) StartContainer(
 				},
 			},
 		},
-	}
-
-	for _, ad := range g.adverts.Adverts() {
-		switch ad := ad.(type) {
-		case *AdvertiseRun:
-			s.Mounts = append(s.Mounts, specs.Mount{
-				Destination: filepath.Join("/run", ad.Name),
-				Type:        "bind",
-				Source:      filepath.Join("/run", ad.Source, ad.Name),
-				Options:     []string{"rbind", "rshared", "rw"},
-			})
-		}
 	}
 
 	if info.FixupSpec != nil {
@@ -498,7 +510,10 @@ func (g *Guest) StartContainer(
 		return err
 	}
 
-	pidPath := filepath.Join(bundlePath, "pid")
+	pidPath := filepath.Join("/run", id+".pid")
+
+	os.RemoveAll(pidPath)
+	defer os.RemoveAll(pidPath)
 
 	err = r.Create(ctx, id, bundlePath, &runc.CreateOpts{
 		IO:      io,
@@ -506,7 +521,7 @@ func (g *Guest) StartContainer(
 	})
 
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "attempting to create container")
 	}
 
 	go func() {
@@ -521,6 +536,11 @@ func (g *Guest) StartContainer(
 			return
 		}
 	}()
+
+	err = r.Start(ctx, id)
+	if err != nil {
+		return errors.Wrapf(err, "attempting to start container")
+	}
 
 	defer func() {
 		err := r.Delete(context.Background(), id, &runc.DeleteOpts{
@@ -616,8 +636,6 @@ func (g *Guest) StartContainer(
 		return err
 	}
 
-	spew.Dump(cniResult)
-
 	var target, target6 string
 
 	primary, ok := cniResult.Interfaces["eth0"]
@@ -653,7 +671,31 @@ func (g *Guest) StartContainer(
 		return ctx.Err()
 	}
 
-	<-ctx.Done()
+	var ms mountStatus
+
+	defer g.clearMounts(&ms)
+
+	cur, advertCh := g.adverts.RegisterEvents(id)
+
+	defer g.adverts.UnregisterEvents(id)
+
+	for _, ad := range cur {
+		g.mountAd(&ms, id, ad)
+	}
+
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			break loop
+		case ev := <-advertCh:
+			if ev.Add {
+				g.mountAd(&ms, id, ev.Advertisement)
+			} else {
+				g.removeAd(&ms, id, ev.Advertisement)
+			}
+		}
+	}
 
 	orig := ctx.Err()
 
@@ -677,4 +719,101 @@ func (g *Guest) StartContainer(
 	}
 
 	return orig
+}
+
+type mountStatus struct {
+	paths map[string]struct{}
+}
+
+func (g *Guest) clearMounts(ms *mountStatus) {
+	for path := range ms.paths {
+
+		os.Remove(path)
+
+		/*
+			cmd := exec.Command("umount", path)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+
+			err := cmd.Run()
+			if err != nil {
+				g.L.Error("error unmounting shared path", "path", path)
+			} else {
+				os.RemoveAll(path)
+			}
+		*/
+	}
+}
+
+func (g *Guest) mountAd(ms *mountStatus, id string, ad Advertisement) {
+	switch ad := ad.(type) {
+	case *AdvertiseRun:
+		// Ignore your own run paths
+		if ad.Source == id {
+			return
+		}
+
+		path := filepath.Join("/run", id, ad.Name)
+		sourceRun := filepath.Join("/var/global-run", ad.Source, ad.Name)
+
+		err := os.Symlink(sourceRun, path)
+		if err != nil {
+			g.L.Error("error creating symlink for run path", "source", sourceRun)
+		}
+
+		/*
+
+			path := filepath.Join("/run", id, ad.Name)
+			fromHost := filepath.Join("/run", ad.Source, ad.Name)
+
+			if fi, err := os.Stat(fromHost); err == nil && fi.IsDir() {
+				err = os.MkdirAll(path, 0755)
+				if err != nil {
+					g.L.Error("error setting up mount point", "error", err, "path", path)
+				}
+			} else {
+				err = ioutil.WriteFile(path, []byte(nil), 0644)
+				if err != nil {
+					g.L.Error("error setting up mount point", "error", err, "path", path)
+				}
+			}
+
+			g.L.Info("bind mounting run path", "from", fromHost, "to", path)
+			cmd := exec.Command("mount", "--bind", fromHost, path)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+
+			err := cmd.Run()
+			if err != nil {
+				g.L.Error("error bind mounting into shared", "from", fromHost, "to", path)
+			}
+		*/
+
+		if ms.paths == nil {
+			ms.paths = map[string]struct{}{}
+		}
+
+		ms.paths[path] = struct{}{}
+	}
+}
+
+func (g *Guest) removeAd(ms *mountStatus, id string, ad Advertisement) {
+	switch ad := ad.(type) {
+	case *AdvertiseRun:
+		path := filepath.Join("/run", id, ad.Name)
+		delete(ms.paths, path)
+
+		/*
+			cmd := exec.Command("umount", path)
+			cmd.Stdout = os.Stdout
+			cmd.Stderr = os.Stderr
+
+			err := cmd.Run()
+			if err != nil {
+				g.L.Error("error unmounting", "path", path)
+			}
+		*/
+
+		os.Remove(path)
+	}
 }

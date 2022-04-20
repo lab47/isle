@@ -9,8 +9,11 @@ else
   initrd=https://github.com/lab47/isle-kernel/releases/download/v20220327/initrd-x86_64
 fi
 
-rm -rf rootfs
-mkdir -p rootfs
+ROOT="${ROOT:-rootfs}"
+TMP="${TMP:-/tmp}"
+
+rm -rf "$ROOT"
+mkdir -p "$ROOT"
 
 mkdir -p release
 
@@ -20,55 +23,59 @@ if ! test -e release/initrd; then
   curl -o release/initrd -L $initrd
 fi
 
-if ! test -e rootfs.tar.gz; then
-  curl -o rootfs.tar.gz -L $root
+if ! test -e $TMP/rootfs.tar.gz; then
+  curl -o $TMP/rootfs.tar.gz -L $root
 fi
 
-if ! test -e kernel.tar.xz; then
-  curl -o kernel.tar.xz -L $kernel
+if ! test -e $TMP/kernel.tar.xz; then
+  curl -o $TMP/kernel.tar.xz -L $kernel
 fi
 
 echo "+ Unpacking rootfs"
-pushd rootfs
-tar xf ../rootfs.tar.gz
+pushd "$ROOT"
+tar xf $TMP/rootfs.tar.gz
 popd
 
 echo "+ Applying custom code"
-cp -a custom/* rootfs
+cp -a custom/* "$ROOT"
 
-chown root.root -R rootfs
+chown root.root -R "$ROOT"
 
 echo "+ Add package"
 
-cp /etc/resolv.conf rootfs/etc/resolv.conf
+cp /etc/resolv.conf "$ROOT/etc/resolv.conf"
 
-chroot rootfs apk add --no-cache
+chroot "$ROOT" apk add --no-cache
 
-rm rootfs/etc/resolv.conf
+rm "$ROOT/etc/resolv.conf"
 
 echo "+ Add macstorage user"
 
-echo "macstorage:x:147:100:For external file access,,,:/tmp:/sbin/nologin" >> rootfs/etc/passwd
-echo "macstorage:!::0:::::" >> rootfs/etc/shadow
+echo "macstorage:x:147:100:For external file access,,,:/tmp:/sbin/nologin" >> "$ROOT/etc/passwd"
+echo "macstorage:!::0:::::" >> "$ROOT/etc/shadow"
 
 echo "+ Adding isle-guest"
 
-cp isle-guest rootfs/usr/sbin/
+cp isle-guest "$ROOT/usr/sbin/"
+
+echo "+ Adding isle-helper"
+
+cp isle-helper "$ROOT/usr/bin/"
 
 echo "+ Adding kernel models"
 
-tar -C rootfs -xf kernel.tar.xz
+tar -C "$ROOT" -xf kernel.tar.xz
 
-gunzip < rootfs/boot/vmlinuz-* > release/vmlinux
+gunzip < "$ROOT"/boot/vmlinuz-* > release/vmlinux
 
 # We don't use these and they just take up space.
-rm -rf rootfs/boot/vmlinu*
+rm -rf "$ROOT"/boot/vmlinu*
 
-KERNEL_VERSION=$(ls rootfs/lib/modules | head -n 1)
+KERNEL_VERSION=$(ls $ROOT/lib/modules | head -n 1)
 
 echo "- Running depmod to be sure modules are ready"
 
-chroot rootfs depmod -ae -F /boot/System.map-$KERNEL_VERSION $KERNEL_VERSION
+chroot "$ROOT" depmod -ae -F /boot/System.map-$KERNEL_VERSION $KERNEL_VERSION
 
 rm release/os.fs
-mksquashfs rootfs release/os.fs -comp xz
+mksquashfs "$ROOT" release/os.fs -comp xz
