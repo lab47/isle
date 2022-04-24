@@ -133,6 +133,10 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 		sess.Setenv("_MSL_INFO", string(data))
 	}
 
+	if lang := os.Getenv("LANG"); lang != "" {
+		sess.Setenv("LANG", lang)
+	}
+
 	rows, cols, err := pty.Getsize(os.Stdout)
 	if err == nil {
 		err = sess.RequestPty(os.Getenv("TERM"), rows, cols, nil)
