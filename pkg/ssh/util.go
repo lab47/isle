@@ -16,25 +16,59 @@ func generateSigner() (ssh.Signer, error) {
 	return ssh.NewSignerFromKey(key)
 }
 
+/*
+	    byte      SSH_MSG_CHANNEL_REQUEST
+      uint32    recipient channel
+      string    "pty-req"
+      boolean   want_reply
+      string    TERM environment variable value (e.g., vt100)
+      uint32    terminal width, characters (e.g., 80)
+      uint32    terminal height, rows (e.g., 24)
+      uint32    terminal width, pixels (e.g., 640)
+      uint32    terminal height, pixels (e.g., 480)
+      string    encoded terminal modes
+*/
+
 func parsePtyRequest(s []byte) (pty Pty, ok bool) {
 	term, s, ok := parseString(s)
 	if !ok {
 		return
 	}
+
 	width32, s, ok := parseUint32(s)
 	if !ok {
 		return
 	}
-	height32, _, ok := parseUint32(s)
+
+	height32, s, ok := parseUint32(s)
 	if !ok {
 		return
 	}
+
+	xwidth32, s, ok := parseUint32(s)
+	if !ok {
+		return
+	}
+
+	xheight32, s, ok := parseUint32(s)
+	if !ok {
+		return
+	}
+
+	modes, s, ok := parseString(s)
+	if !ok {
+		return
+	}
+
 	pty = Pty{
 		Term: term,
 		Window: Window{
-			Width:  int(width32),
-			Height: int(height32),
+			Width:       int(width32),
+			Height:      int(height32),
+			PixelWidth:  int(xwidth32),
+			PixelHeight: int(xheight32),
 		},
+		Modes: modes,
 	}
 	return
 }
