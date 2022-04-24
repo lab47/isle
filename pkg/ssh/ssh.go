@@ -70,15 +70,17 @@ type ConnectionFailedCallback func(conn net.Conn, err error)
 
 // Window represents the size of a PTY window.
 type Window struct {
-	Width  int
-	Height int
+	Width       int
+	Height      int
+	PixelWidth  int
+	PixelHeight int
 }
 
 // Pty represents a PTY request and configuration.
 type Pty struct {
 	Term   string
 	Window Window
-	// HELP WANTED: terminal modes!
+	Modes  string
 }
 
 // Serve accepts incoming SSH connections on the listener l, creating a new

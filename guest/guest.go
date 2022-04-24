@@ -308,6 +308,8 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		sp.Env = append(sp.Env, fmt.Sprintf("TERM=%s", ptyReq.Term))
 	}
 
+	// TODO port over https://github.com/openssh/openssh-portable/blob/2dc328023f60212cd29504fc05d849133ae47355/ttymodes.c from ptyReq.Modes
+
 	var (
 		width int
 		setup io.Writer = ioutil.Discard
