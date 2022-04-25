@@ -277,6 +277,9 @@ func (g *Guest) StartContainer(
 	os.MkdirAll(runDir, 0777)
 	defer os.RemoveAll(runDir)
 
+	// make sure that the rundir is properly setup
+	os.Chmod(runDir, 0777)
+
 	os.MkdirAll("/run/share", 0755)
 
 	s := specs.Spec{
@@ -288,7 +291,7 @@ func (g *Guest) StartContainer(
 			},
 			Args: []string{"/dev/init"},
 			Env: []string{
-				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/isle/bin",
 				"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
 			},
 			Cwd: "/",
@@ -433,6 +436,12 @@ func (g *Guest) StartContainer(
 				Destination: "/bin/isle",
 				Type:        "bind",
 				Source:      "/usr/bin/isle-helper",
+				Options:     []string{"rbind", "rshared", "ro"},
+			},
+			{
+				Destination: "/opt/isle/bin",
+				Type:        "bind",
+				Source:      "/opt/isle/bin",
 				Options:     []string{"rbind", "rshared", "ro"},
 			},
 		},
@@ -626,7 +635,7 @@ func (g *Guest) StartContainer(
 
 	var setupSp specs.Process
 	setupSp.Args = []string{"/bin/sh", "-c", strings.Join(setup, "; ")}
-	setupSp.Env = []string{"PATH=/bin:/sbin:/usr/bin:/usr/sbin"}
+	setupSp.Env = []string{"PATH=/bin:/sbin:/usr/bin:/usr/sbin:/opt/isle/bin"}
 	setupSp.Cwd = "/"
 
 	g.L.Info("running container setup")

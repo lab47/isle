@@ -277,7 +277,7 @@ func (g *Guest) runApp(ctx context.Context, bundlePath string, info ContainerInf
 
 	sp := &specs.Process{
 		Env: []string{
-			"PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/run/share/bin:/run/share/sbin",
+			"PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/run/share/bin:/run/share/sbin:/opt/isle/bin",
 			"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
 		},
 	}

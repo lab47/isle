@@ -78,6 +78,9 @@ void VZVirtioSocketDevice_setSocketListenerForPort(void *socketDevice, void *vmQ
 void VZVirtioSocketDevice_removeSocketListenerForPort(void *socketDevice, void *vmQueue, uint32_t port);
 void VZVirtioSocketDevice_connectToPort(void *socketDevice, void *vmQueue, uint32_t port, const char *socketDeviceID);
 
+void *VZVirtualMachine_memoryBalloonDevices(void *machine);
+void VZVirtioMemoryBalloonDevice_setTargetVirtualMachineMemorySize(void *socketDevice, uint64_t port);
+
 /* VirtualMachine */
 void *newVZVirtualMachineWithDispatchQueue(void *config, void *queue, const char *vmid);
 bool requestStopVirtualMachine(void *machine, void *queue, void **error);

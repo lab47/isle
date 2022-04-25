@@ -215,6 +215,11 @@ var _ net.Conn = (*VirtioSocketConnection)(nil)
 func newVirtioSocketConnection(ptr unsafe.Pointer) *VirtioSocketConnection {
 	id := xid.New().String()
 	vzVirtioSocketConnection := C.convertVZVirtioSocketConnection2Flat(ptr)
+	err := unix.SetNonblock(int(vzVirtioSocketConnection.fileDescriptor), true)
+	if err != nil {
+		fmt.Printf("set nonblock: %s\n", err.Error())
+	}
+
 	conn := &VirtioSocketConnection{
 		id:              id,
 		sourcePort:      (uint32)(vzVirtioSocketConnection.sourcePort),

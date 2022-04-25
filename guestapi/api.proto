@@ -7,6 +7,9 @@ option go_package = "lab47.dev/isle/guestapi";
 service GuestAPI {
   rpc AddApp(AddAppReq) returns (AddAppResp);
   rpc DisableApp(DisableAppReq) returns (DisableAppResp);
+
+  rpc RunOnMac(stream RunInput) returns (stream RunOutput);
+  rpc TrimMemory(TrimMemoryReq) returns (TrimMemoryResp);
 }
 
 message AddAppReq {
@@ -25,3 +28,57 @@ message DisableAppReq {
 message DisableAppResp {
 }
 
+message RunInput {
+  repeated string command = 1;
+  bytes input = 2;
+  bool closed = 3;
+}
+
+message RunOutput {
+  bytes data = 1;
+  bool closed = 2;
+  int32 exit_code = 3;
+}
+
+message RunOnMacResp {
+  int32 exit_code = 1;
+  bytes output = 2;
+}
+
+message RunningReq {
+  string ip = 1;
+}
+
+message RunningResp { }
+
+message StartPortForwardReq {
+  int32 port = 1;
+  string key = 2;
+}
+
+message StartPortForwardResp { }
+
+message CancelPortForwardReq {
+  int32 port = 1;
+  string key = 2;
+}
+
+message CancelPortForwardResp { }
+
+message TrimMemoryReq {
+  int32 set = 1;
+  int32 adjust = 2;
+  bool reset = 3;
+}
+
+message TrimMemoryResp {
+  int32 total_memory = 1;
+}
+
+service HostAPI {
+  rpc RunOnMac(stream RunInput) returns (stream RunOutput);
+  rpc Running(RunningReq) returns (RunningResp);
+  rpc StartPortForward(StartPortForwardReq) returns (StartPortForwardResp);
+  rpc CancelPortForward(CancelPortForwardReq) returns (CancelPortForwardResp);
+  rpc TrimMemory(TrimMemoryReq) returns (TrimMemoryResp);
+}

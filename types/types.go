@@ -36,6 +36,13 @@ type ShellMessage struct {
 	Cols    uint16
 }
 
+type RunOnHostMacMessage struct {
+	Command []string
+}
+
+type RunOnHostMacResponse struct {
+}
+
 type StatusMessage struct {
 	Error string
 }
