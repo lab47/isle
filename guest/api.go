@@ -4,29 +4,29 @@ import (
 	"context"
 	"fmt"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 
+	"github.com/fxamacker/cbor/v2"
 	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/pkg/locator"
+	"github.com/lab47/isle/types"
+	"google.golang.org/grpc"
 )
 
-func (g *Guest) startAPI(ctx context.Context) {
-	server := &http.Server{
-		Addr:    "0.0.0.0:1212",
-		Handler: guestapi.NewGuestAPIServer(g),
-		BaseContext: func(l net.Listener) context.Context {
-			return ctx
-		},
-	}
+func (g *Guest) startAPI(ctx context.Context) error {
+	serv := grpc.NewServer()
 
-	g.L.Info("starting api listener", "addr", server.Addr)
+	guestapi.RegisterGuestAPIServer(serv, g)
 
-	err := server.ListenAndServe()
+	g.L.Info("starting api listener")
+
+	li, err := net.Listen("tcp", "0.0.0.0:1212")
 	if err != nil {
-		g.L.Error("error in api listener", "error", err)
+		return err
 	}
+
+	return serv.Serve(li)
 }
 
 func (g *Guest) AddApp(ctx context.Context, req *guestapi.AddAppReq) (*guestapi.AddAppResp, error) {
@@ -97,4 +97,84 @@ func (g *Guest) DisableApp(ctx context.Context, req *guestapi.DisableAppReq) (*g
 
 	var resp guestapi.DisableAppResp
 	return &resp, nil
+}
+
+func (g *Guest) sendToHost(ctx context.Context, kind string, req interface{}, resp interface{}) error {
+	sess := g.currentSession
+	host, err := sess.Open()
+	if err != nil {
+		g.L.Error("error opening connection to host", "error", err)
+		return err
+	}
+
+	enc := cbor.NewEncoder(host)
+	dec := cbor.NewDecoder(host)
+
+	err = enc.Encode(types.HeaderMessage{Kind: kind})
+	if err != nil {
+		g.L.Error("error encoding message to host", "error", err)
+		return err
+	}
+
+	err = enc.Encode(req)
+	if err != nil {
+		g.L.Error("error encoding message to host", "error", err)
+		return err
+	}
+
+	var respm types.ResponseMessage
+
+	err = dec.Decode(&respm)
+	if err != nil {
+		g.L.Error("error decoding message to host", "error", err)
+		return err
+	}
+
+	if respm.Code != types.OK {
+		g.L.Error("host reported error canceling port", "error", respm.Error)
+		return fmt.Errorf("remote error: %s", respm.Error)
+	}
+
+	if resp == nil {
+		return nil
+	}
+
+	return dec.Decode(&resp)
+}
+
+func (g *Guest) RunOnMac(s guestapi.GuestAPI_RunOnMacServer) error {
+	c, err := g.hostAPI().RunOnMac(s.Context())
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		for {
+			m, err := c.Recv()
+			if err != nil {
+				return
+			}
+
+			err = s.Send(m)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		m, err := s.Recv()
+		if err != nil {
+			return err
+		}
+
+		err = c.Send(m)
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func (g *Guest) TrimMemory(ctx context.Context, req *guestapi.TrimMemoryReq) (*guestapi.TrimMemoryResp, error) {
+	return g.hostAPI().TrimMemory(ctx, req)
 }

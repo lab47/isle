@@ -20,11 +20,13 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
+	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/pkg/bytesize"
 	"github.com/lab47/isle/pkg/timesync"
 	"github.com/lab47/isle/pkg/vz"
 	"github.com/lab47/isle/types"
 	"golang.org/x/sys/unix"
+	"google.golang.org/grpc"
 )
 
 type portListener struct {
@@ -33,6 +35,8 @@ type portListener struct {
 }
 
 type VM struct {
+	guestapi.UnimplementedHostAPIServer
+
 	L        hclog.Logger
 	StateDir string
 	Config   Config
@@ -45,6 +49,11 @@ type VM struct {
 	linuxMountPath string
 
 	mountOnce sync.Once
+
+	currentSession *yamux.Session
+	memoryBalloon  *vz.VirtioMemoryBalloonDevice
+	totalMemory    int64
+	currentMemory  int64
 }
 
 type RunningVM struct {
@@ -175,6 +184,9 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 		uint(cores),
 		uint64(memInBytes),
 	)
+
+	v.totalMemory = int64(memInBytes)
+	v.currentMemory = v.totalMemory
 
 	vmr, hostw, err := os.Pipe()
 	if err != nil {
@@ -371,6 +383,8 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 	vm := vz.NewVirtualMachine(config)
 
 	sock := vm.SocketDevices()[0]
+
+	v.memoryBalloon = vm.MemoryBalloonDevices()[0]
 
 	/*
 
@@ -610,6 +624,10 @@ func (v *VM) startListener(
 				// from the CLI
 				curHostCh = hostCh
 
+				v.mu.Lock()
+				v.currentSession = sess
+				v.mu.Unlock()
+
 				go v.timesync(ctx, sess)
 				go v.handleFromGuest(ctx, sess)
 			case c := <-curHostCh:
@@ -732,7 +750,49 @@ func (v *VM) timesync(ctx context.Context, sess *yamux.Session) {
 	}
 }
 
+type peekConn struct {
+	io.Reader
+	net.Conn
+}
+
+func (c *peekConn) Read(b []byte) (int, error) {
+	return c.Reader.Read(b)
+}
+
+type chanListen chan net.Conn
+
+func (c chanListen) Accept() (net.Conn, error) {
+	conn, ok := <-c
+	if !ok {
+		return nil, io.EOF
+	}
+
+	return conn, nil
+}
+
+type chanAddr struct{}
+
+func (_ chanAddr) Network() string { return "chan" }
+func (_ chanAddr) String() string  { return "chan" }
+
+func (c chanListen) Addr() net.Addr {
+	return chanAddr{}
+}
+
+func (c chanListen) Close() error {
+	close(c)
+	return nil
+}
+
 func (v *VM) handleFromGuest(ctx context.Context, sess *yamux.Session) {
+	serv := grpc.NewServer()
+
+	guestapi.RegisterHostAPIServer(serv, v)
+
+	httpListen := make(chanListen)
+
+	go serv.Serve(httpListen)
+
 	for {
 		c, err := sess.AcceptStream()
 		if err != nil {
@@ -742,11 +802,167 @@ func (v *VM) handleFromGuest(ctx context.Context, sess *yamux.Session) {
 			return
 		}
 
-		go v.handleGuestConn(c)
+		r := bufio.NewReader(c)
+		prefix, err := r.Peek(1)
+		if err != nil {
+			v.L.Error("error peeking new connection", "error", err)
+			continue
+		}
+
+		ic := &peekConn{Reader: r, Conn: c}
+
+		if prefix[0] == types.ProtocolByte {
+			r.Discard(1)
+			v.L.Info("handling custom protocol")
+			go v.handleGuestConn(ic)
+		} else {
+			v.L.Info("handling http protocol")
+			httpListen <- ic
+		}
 	}
 }
 
-func (v *VM) handleGuestConn(c *yamux.Stream) {
+func (v *VM) TrimMemory(ctx context.Context, req *guestapi.TrimMemoryReq) (*guestapi.TrimMemoryResp, error) {
+	if req.Reset_ {
+		v.currentMemory = v.totalMemory
+		v.memoryBalloon.SetTargetVirtualMachineMemorySize(uint64(v.totalMemory))
+	} else if req.Set != 0 {
+		v.memoryBalloon.SetTargetVirtualMachineMemorySize(uint64(req.Set) * 1024 * 1024)
+	} else {
+		mem := v.currentMemory + (int64(req.Adjust) * 1024 * 1024)
+		v.currentMemory = v.currentMemory
+		v.memoryBalloon.SetTargetVirtualMachineMemorySize(uint64(mem))
+	}
+
+	return &guestapi.TrimMemoryResp{TotalMemory: int32(v.currentMemory)}, nil
+}
+
+func (v *VM) RunOnMac(s guestapi.HostAPI_RunOnMacServer) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+
+	in, err := s.Recv()
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(in.Command[0], in.Command[1:]...)
+	cmd.Env = os.Environ()
+	cmd.Dir = homeDir
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+
+	err = cmd.Start()
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		for {
+			m, err := s.Recv()
+			if err != nil {
+				return
+			}
+
+			if m.Closed {
+				stdin.Close()
+				return
+			}
+
+			stdin.Write(m.Input)
+		}
+	}()
+
+	buf := make([]byte, 1024)
+
+	for {
+		n, _ := stdout.Read(buf)
+		if n == 0 {
+			break
+		}
+
+		err := s.Send(&guestapi.RunOutput{
+			Data: buf[:n],
+		})
+		if err != nil {
+			break
+		}
+	}
+
+	var exit int
+
+	err = cmd.Wait()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			exit = ee.ExitCode()
+		} else {
+			return err
+		}
+	}
+
+	s.Send(&guestapi.RunOutput{
+		Closed:   true,
+		ExitCode: int32(exit),
+	})
+
+	return nil
+}
+
+func (v *VM) Running(ctx context.Context, req *guestapi.RunningReq) (*guestapi.RunningResp, error) {
+	v.mountOnce.Do(func() {
+		v.mountLinux(req.Ip)
+	})
+
+	return &guestapi.RunningResp{}, nil
+}
+
+func (v *VM) StartPortForward(ctx context.Context, req *guestapi.StartPortForwardReq) (*guestapi.StartPortForwardResp, error) {
+	l, err := net.Listen("tcp", fmt.Sprintf(":%d", req.Port))
+	if err != nil {
+		v.L.Error("unable to listen on port", "error", err)
+		return nil, err
+	}
+
+	v.mu.Lock()
+	if v.listeners == nil {
+		v.listeners = make(map[int]portListener)
+	}
+
+	v.listeners[int(req.Port)] = portListener{Listener: l, Key: req.Key}
+	cur := v.currentSession
+	v.mu.Unlock()
+
+	v.L.Debug("setup port forwarder", "port", req.Port)
+	go v.forwardPort(int(req.Port), req.Key, l, cur)
+
+	return &guestapi.StartPortForwardResp{}, nil
+}
+
+func (v *VM) CancelPortForward(ctx context.Context, req *guestapi.CancelPortForwardReq) (*guestapi.CancelPortForwardResp, error) {
+	v.mu.Lock()
+	if l, ok := v.listeners[int(req.Port)]; ok {
+		l.Close()
+	}
+	v.mu.Unlock()
+
+	var resp types.ResponseMessage
+	resp.Code = types.OK
+
+	v.L.Debug("removed port forwarder", "port", req.Port)
+	return &guestapi.CancelPortForwardResp{}, nil
+}
+
+func (v *VM) handleGuestConn(c net.Conn) {
 	defer c.Close()
 
 	enc := cbor.NewEncoder(c)
@@ -773,77 +989,6 @@ func (v *VM) handleGuestConn(c *yamux.Stream) {
 		if err != nil {
 			v.L.Error("error encoding response", "error", err)
 		}
-	case "running":
-		var pm types.RunningMessage
-		err = dec.Decode(&pm)
-		if err != nil {
-			v.L.Error("error decoding port forward message", "error", err)
-			return
-		}
-
-		v.L.Info("detected guest running", "ip", pm.IP)
-
-		v.mountOnce.Do(func() {
-			v.mountLinux(pm.IP)
-		})
-	case "cancel-port-forward":
-		var pm types.PortForwardMessage
-		err = dec.Decode(&pm)
-		if err != nil {
-			v.L.Error("error decoding port forward message", "error", err)
-			return
-		}
-
-		v.mu.Lock()
-		if l, ok := v.listeners[pm.Port]; ok {
-			l.Close()
-		}
-		v.mu.Unlock()
-
-		var resp types.ResponseMessage
-		resp.Code = types.OK
-
-		err = enc.Encode(resp)
-		if err != nil {
-			v.L.Error("error encoding response", "error", err)
-		}
-
-		v.L.Debug("removed port forwarder", "port", pm.Port)
-
-	case "port-forward":
-		var pm types.PortForwardMessage
-		err = dec.Decode(&pm)
-		if err != nil {
-			v.L.Error("error decoding port forward message", "error", err)
-			return
-		}
-
-		var resp types.ResponseMessage
-
-		l, err := net.Listen("tcp", fmt.Sprintf(":%d", pm.Port))
-		if err != nil {
-			v.L.Error("unable to listen on port", "error", err)
-			resp.Code = types.Error
-			resp.Error = err.Error()
-		} else {
-			resp.Code = types.OK
-		}
-
-		v.mu.Lock()
-		if v.listeners == nil {
-			v.listeners = make(map[int]portListener)
-		}
-
-		v.listeners[pm.Port] = portListener{Listener: l, Key: pm.Key}
-		v.mu.Unlock()
-
-		err = enc.Encode(resp)
-		if err != nil {
-			v.L.Error("error encoding response", "error", err)
-		}
-
-		v.L.Debug("setup port forwarder", "port", pm.Port)
-		go v.forwardPort(pm.Port, pm.Key, l, c.Session())
 
 	case "ssh-agent":
 		path := os.Getenv("SSH_AUTH_SOCK")

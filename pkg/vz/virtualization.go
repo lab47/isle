@@ -152,6 +152,20 @@ func (v *VirtualMachine) SocketDevices() []*VirtioSocketDevice {
 	return socketDevices
 }
 
+func (v *VirtualMachine) MemoryBalloonDevices() []*VirtioMemoryBalloonDevice {
+	nsArray := &NSArray{
+		pointer: pointer{
+			ptr: C.VZVirtualMachine_memoryBalloonDevices(v.Ptr()),
+		},
+	}
+	ptrs := nsArray.ToPointerSlice()
+	devs := make([]*VirtioMemoryBalloonDevice, len(ptrs))
+	for i, ptr := range ptrs {
+		devs[i] = newVirtioMemoryBalloonDevice(ptr)
+	}
+	return devs
+}
+
 //export changeStateOnObserver
 func changeStateOnObserver(state C.int, cID *C.char) {
 	id := (*char)(cID)

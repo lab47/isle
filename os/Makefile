@@ -4,4 +4,4 @@ build:
 
 .PHONY:
 release: build
-	tar -C release -czf os-$$VERSION-$$PLATFORM.tar.gz .
+	tar -C release -czf os-v$$VERSION-$$PLATFORM.tar.gz .

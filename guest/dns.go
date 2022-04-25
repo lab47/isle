@@ -54,16 +54,18 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 	h.L.Debug("processing dns request", "question", r.Question[0].String(), "client", w.RemoteAddr())
 
-	for _, conn := range h.conns {
-		msg, _, err := h.client.ExchangeWithConn(r, conn)
-		if err == nil {
-			if len(msg.Answer) == 0 {
-				h.L.Debug("no answer detected")
-			} else {
-				h.L.Debug("responding to request", "answer", msg.Answer[0].String())
+	for i := 0; i < 10; i++ {
+		for _, conn := range h.conns {
+			msg, _, err := h.client.ExchangeWithConn(r, conn)
+			if err == nil {
+				if len(msg.Answer) == 0 {
+					h.L.Debug("no answer detected")
+				} else {
+					h.L.Debug("responding to request", "answer", msg.Answer[0].String())
+				}
+				w.WriteMsg(msg)
+				return
 			}
-			w.WriteMsg(msg)
-			return
 		}
 	}
 

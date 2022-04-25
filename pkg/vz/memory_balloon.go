@@ -6,7 +6,12 @@ package vz
 # include "virtualization.h"
 */
 import "C"
-import "runtime"
+import (
+	"runtime"
+	"unsafe"
+
+	"github.com/rs/xid"
+)
 
 // MemoryBalloonDeviceConfiguration for a memory balloon device configuration.
 type MemoryBalloonDeviceConfiguration interface {
@@ -41,4 +46,29 @@ func NewVirtioTraditionalMemoryBalloonDeviceConfiguration() *VirtioTraditionalMe
 		self.Release()
 	})
 	return config
+}
+
+type VirtioMemoryBalloonDevice struct {
+	id string
+
+	pointer
+}
+
+func newVirtioMemoryBalloonDevice(ptr unsafe.Pointer) *VirtioMemoryBalloonDevice {
+	id := xid.New().String()
+	dev := &VirtioMemoryBalloonDevice{
+		id: id,
+		pointer: pointer{
+			ptr: ptr,
+		},
+	}
+
+	runtime.SetFinalizer(dev, func(self *VirtioMemoryBalloonDevice) {
+		self.Release()
+	})
+	return dev
+}
+
+func (v *VirtioMemoryBalloonDevice) SetTargetVirtualMachineMemorySize(megs uint64) {
+	C.VZVirtioMemoryBalloonDevice_setTargetVirtualMachineMemorySize(v.Ptr(), C.ulonglong(megs))
 }

@@ -64,7 +64,7 @@ cp isle-helper "$ROOT/usr/bin/"
 
 echo "+ Adding kernel models"
 
-tar -C "$ROOT" -xf kernel.tar.xz
+tar -C "$ROOT" -xf $TMP/kernel.tar.xz
 
 gunzip < "$ROOT"/boot/vmlinuz-* > release/vmlinux
 

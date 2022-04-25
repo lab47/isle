@@ -12,6 +12,7 @@ import (
 	"io"
 	"io/ioutil"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -30,6 +31,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
+	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/pkg/netutil"
 	"github.com/lab47/isle/pkg/reaper"
 	"github.com/lab47/isle/pkg/runc"
@@ -41,6 +43,7 @@ import (
 	"github.com/rs/xid"
 	"go.etcd.io/bbolt"
 	"golang.org/x/sys/unix"
+	"google.golang.org/grpc"
 
 	gossh "github.com/lab47/isle/pkg/crypto/ssh"
 )
@@ -54,6 +57,8 @@ type runningContainer struct {
 }
 
 type Guest struct {
+	guestapi.UnimplementedGuestAPIServer
+
 	L hclog.Logger
 	C *containerd.Client
 
@@ -86,6 +91,8 @@ type Guest struct {
 	adverts Advertisements
 
 	db *bbolt.DB
+
+	currentSession *yamux.Session
 }
 
 func newUniqueId() string {
@@ -259,7 +266,7 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 
 	sp := &specs.Process{
 		Env: []string{
-			"PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/run/share/bin:/run/share/sbin",
+			"PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/run/share/bin:/run/share/sbin:/opt/isle/bin",
 			"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
 		},
 	}
@@ -541,6 +548,8 @@ func (g *Guest) setupSnapshot(ctx context.Context, id string, i containerd.Image
 }
 
 func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
+	g.currentSession = l
+
 	ctx = namespaces.WithNamespace(ctx, "msl")
 
 	var key *rsa.PrivateKey
@@ -643,6 +652,7 @@ func (g *Guest) forwardSSHAgent(ctx context.Context, sess *yamux.Session, l net.
 			continue
 		}
 
+		host.Write([]byte{types.ProtocolByte})
 		enc := cbor.NewEncoder(host)
 		enc.Encode(types.HeaderMessage{Kind: "ssh-agent"})
 
@@ -702,21 +712,48 @@ func (g *Guest) probIP() string {
 	return ""
 }
 
+func (g *Guest) vmTransport() *http.Transport {
+	return &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return g.currentSession.Open()
+		},
+		MaxIdleConns:          100,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	}
+}
+
+func (g *Guest) vmHttpClient() *http.Client {
+	return &http.Client{
+		Transport: g.vmTransport(),
+	}
+}
+
+func (g *Guest) hostAPI() guestapi.HostAPIClient {
+	conn, err := grpc.Dial("host:1",
+		grpc.WithDialer(func(s string, d time.Duration) (net.Conn, error) {
+			return g.currentSession.Open()
+		}),
+		grpc.WithInsecure(),
+	)
+	if err != nil {
+		panic(err)
+	}
+
+	return guestapi.NewHostAPIClient(conn)
+}
+
 func (g *Guest) discoverIP(ctx context.Context, sess *yamux.Session) {
 	for {
 		ip := g.probIP()
 		if ip != "" {
-			out, err := sess.Open()
+			_, err := g.hostAPI().Running(ctx, &guestapi.RunningReq{
+				Ip: ip,
+			})
 			if err != nil {
 				g.L.Error("error opening yamux session for running", "error", err)
 			} else {
-				defer out.Close()
-				enc := cbor.NewEncoder(out)
-				enc.Encode(types.HeaderMessage{Kind: "running"})
-				enc.Encode(types.RunningMessage{
-					IP: ip,
-				})
-
 				g.L.Info("xmit'd running message", "ip", ip)
 				return
 			}
@@ -861,14 +898,14 @@ func (g *Guest) monitorPorts(ctx context.Context, sess *yamux.Session, target st
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			g.readPorts(sess, target, path, ports)
+			g.readPorts(ctx, sess, target, path, ports)
 		case <-sigCh:
-			g.readPorts(sess, target, path, ports)
+			g.readPorts(ctx, sess, target, path, ports)
 		}
 	}
 }
 
-func (g *Guest) readPorts(sess *yamux.Session, target string, path string, ports map[int64]struct{}) {
+func (g *Guest) readPorts(ctx context.Context, sess *yamux.Session, target string, path string, ports map[int64]struct{}) {
 	f, err := os.Open(path)
 	if err != nil {
 		g.L.Error("error reading tcp listing", "error", err, "path", path)
@@ -923,42 +960,15 @@ func (g *Guest) readPorts(sess *yamux.Session, target string, path string, ports
 			continue
 		}
 
-		host, err := sess.Open()
-		if err != nil {
-			g.L.Error("error opening connection to host", "error", err)
-			continue
-		}
-
-		enc := cbor.NewEncoder(host)
-		dec := cbor.NewDecoder(host)
-
 		g.L.Info("requesting port to be forwarded", "port", numPort)
 
-		err = enc.Encode(types.HeaderMessage{Kind: "port-forward"})
-		if err != nil {
-			g.L.Error("error encoding message to host", "error", err)
-			continue
-		}
-
-		err = enc.Encode(types.PortForwardMessage{
-			Port: int(numPort),
+		_, err = g.hostAPI().StartPortForward(ctx, &guestapi.StartPortForwardReq{
+			Port: int32(numPort),
 			Key:  target,
 		})
+
 		if err != nil {
-			g.L.Error("error encoding message to host", "error", err)
-			continue
-		}
-
-		var resp types.ResponseMessage
-
-		err = dec.Decode(&resp)
-		if err != nil {
-			g.L.Error("error decoding message to host", "error", err)
-			continue
-		}
-
-		if resp.Code != types.OK {
-			g.L.Error("host reported error listening on port", "error", resp.Error)
+			g.L.Error("error setting up port forwarding", "error", err)
 			continue
 		}
 
@@ -972,46 +982,17 @@ func (g *Guest) readPorts(sess *yamux.Session, target string, path string, ports
 
 			delete(ports, p)
 
-			host, err := sess.Open()
-			if err != nil {
-				g.L.Error("error opening connection to host", "error", err)
-				continue
-			}
-
-			enc := cbor.NewEncoder(host)
-			dec := cbor.NewDecoder(host)
-
-			g.L.Info("requesting port to be no longer be forwarded", "port", p)
-
-			err = enc.Encode(types.HeaderMessage{Kind: "cancel-port-forward"})
-			if err != nil {
-				g.L.Error("error encoding message to host", "error", err)
-				continue
-			}
-
-			err = enc.Encode(types.PortForwardMessage{
-				Port: int(p),
+			_, err = g.hostAPI().StartPortForward(ctx, &guestapi.StartPortForwardReq{
+				Port: int32(p),
 				Key:  target,
 			})
+
 			if err != nil {
-				g.L.Error("error encoding message to host", "error", err)
+				g.L.Error("host reported error canceling port", "error", err)
 				continue
 			}
 
-			var resp types.ResponseMessage
-
-			err = dec.Decode(&resp)
-			if err != nil {
-				g.L.Error("error decoding message to host", "error", err)
-				continue
-			}
-
-			if resp.Code == types.OK {
-				g.L.Info("canceled port forward with host")
-			} else {
-				g.L.Error("host reported error canceling port", "error", resp.Error)
-				continue
-			}
+			g.L.Info("canceled port forward with host")
 		}
 	}
 }

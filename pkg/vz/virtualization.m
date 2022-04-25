@@ -524,6 +524,16 @@ void *VZVirtualMachine_socketDevices(void *machine)
     return [(VZVirtualMachine *)machine socketDevices]; // NSArray<VZSocketDevice *>
 }
 
+void *VZVirtualMachine_memoryBalloonDevices(void *machine)
+{
+    return [(VZVirtualMachine *)machine memoryBalloonDevices]; // NSArray<VZMemoryBalloonDeviceConfiguration *>
+}
+
+void VZVirtioMemoryBalloonDevice_setTargetVirtualMachineMemorySize(void *dev, uint64_t mem)
+{
+    [(VZVirtioTraditionalMemoryBalloonDevice*)dev setTargetVirtualMachineMemorySize:mem];
+}
+
 /*!
  @abstract Initialize the VZMACAddress from a string representation of a MAC address.
  @param string

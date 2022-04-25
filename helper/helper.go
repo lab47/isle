@@ -3,13 +3,14 @@ package helper
 import (
 	"context"
 	"fmt"
-	"net/http"
+	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/jessevdk/go-flags"
 	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/pkg/clog"
+	"google.golang.org/grpc"
 )
 
 type Options struct {
@@ -27,8 +28,14 @@ func (i *InstallCmd) Execute(args []string) error {
 
 	ctx := context.Background()
 
-	cl := guestapi.NewGuestAPIProtobufClient("http://10.4.0.1:1212", http.DefaultClient)
-	_, err := cl.AddApp(ctx, &guestapi.AddAppReq{
+	cc, err := grpc.Dial("10.4.0.1:1212", grpc.WithInsecure())
+	if err != nil {
+		return err
+	}
+
+	cl := guestapi.NewGuestAPIClient(cc)
+
+	_, err = cl.AddApp(ctx, &guestapi.AddAppReq{
 		Selector: args[0],
 		Name:     args[0],
 	})
@@ -56,8 +63,14 @@ func (i *RemoveCmd) Execute(args []string) error {
 
 	ctx := context.Background()
 
-	cl := guestapi.NewGuestAPIProtobufClient("http://10.4.0.1:1212", http.DefaultClient)
-	_, err := cl.DisableApp(ctx, &guestapi.DisableAppReq{
+	cc, err := grpc.Dial("10.4.0.1:1212", grpc.WithInsecure())
+	if err != nil {
+		return err
+	}
+
+	cl := guestapi.NewGuestAPIClient(cc)
+
+	_, err = cl.DisableApp(ctx, &guestapi.DisableAppReq{
 		Id: args[0],
 	})
 	if err != nil {
@@ -99,6 +112,107 @@ func (i *LogsCmd) Execute(args []string) error {
 
 var logsCmd LogsCmd
 
+type RunCmd struct{}
+
+func (i *RunCmd) Execute(args []string) error {
+	ctx := context.Background()
+
+	cc, err := grpc.Dial("10.4.0.1:1212", grpc.WithInsecure())
+	if err != nil {
+		return err
+	}
+
+	cl := guestapi.NewGuestAPIClient(cc)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	stream, err := cl.RunOnMac(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error running command: %s\n", err)
+		return nil
+	}
+
+	stream.Send(&guestapi.RunInput{
+		Command: args,
+	})
+
+	go func() {
+		buf := make([]byte, 1024)
+
+		for {
+			n, _ := os.Stdin.Read(buf)
+			if n == 0 {
+				stream.Send(&guestapi.RunInput{
+					Closed: true,
+				})
+				return
+			}
+
+			err := stream.Send(&guestapi.RunInput{
+				Input: buf[:n],
+			})
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		out, err := stream.Recv()
+		if err != nil {
+			os.Exit(1)
+		}
+
+		if out.Closed {
+			os.Exit(int(out.ExitCode))
+		}
+
+		os.Stdout.Write(out.Data)
+	}
+}
+
+var runCmd RunCmd
+
+type TrimCmd struct {
+	Set    int32 `long:"set" description:"set total memory megabytes"`
+	Add    int32 `short:"a" long:"adjust" description:"add memory to this isle"`
+	Remove int32 `short:"r" long:"remove" description:"remove memory from this isle"`
+	Reset  bool  `long:"reset" description:"reset total memory to default"`
+}
+
+func (i *TrimCmd) Execute(args []string) error {
+	ctx := context.Background()
+
+	cc, err := grpc.Dial("10.4.0.1:1212", grpc.WithInsecure())
+	if err != nil {
+		return err
+	}
+
+	cl := guestapi.NewGuestAPIClient(cc)
+
+	var adjust int32
+
+	if i.Add != 0 {
+		adjust = i.Add
+	} else if i.Remove != 0 {
+		adjust = -i.Remove
+	}
+
+	_, err = cl.TrimMemory(ctx, &guestapi.TrimMemoryReq{
+		Set:    i.Set,
+		Adjust: adjust,
+		Reset_: i.Reset,
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error trimming memory: %s\n", err)
+	}
+
+	return nil
+}
+
+var trimCmd TrimCmd
+
 func Main(args []string) {
 	parser := flags.NewNamedParser("isle", flags.Default)
 	parser.AddCommand("install-app",
@@ -117,6 +231,18 @@ func Main(args []string) {
 		"read logs from a clog formatted dir",
 		"read logs from a clog formatted dir",
 		&logsCmd,
+	)
+
+	parser.AddCommand("run",
+		"execute a command on your mac",
+		"execute a command on your mac",
+		&runCmd,
+	)
+
+	parser.AddCommand("trim-memory",
+		"trim memory from isle",
+		"trim memory from isle",
+		&trimCmd,
 	)
 
 	parser.ParseArgs(args)
