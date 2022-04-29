@@ -1,10 +1,10 @@
-# Isle Alpha Release
+# Isle
 
 Thanks for your interest in `isle`, Integrated System Linux Environment.
 
 Isle is currently in alpha, but working relatively stably! This page will document features and known issues!
 
-Isle is a bit like WSL (Windows Subsystem for Linux) for Mac.
+Isle is a bit like [WSL][2] (Windows Subsystem for Linux) for Mac.
 
 ## Getting Started
 
@@ -37,9 +37,14 @@ v0.5.0: [https://github.com/lab47/isle/releases/tag/v0.5.0](https://github.com/l
 
 ## Architecture
 
-Yalr4m uses Virtualization.framework, built into macs since 11.0, to spawn a linux VM. It then uses runc within the VM to provide distro-specific environments. MacOS 12.0+ is required as it uses the file sharing APIs that were added in 12.0 to provide access to the MacOS filesystem within linux.
+Isle uses [Virtualization.framework][1], built into macs since 11.0, to spawn a linux VM.
+It then uses runc within the VM to provide distro-specific environments.
+MacOS 12.0+ is required as it uses the file sharing APIs that were added in 12.0 to provide access to the MacOS filesystem within linux.
 
 ## Roadmap
 
 - Ability to run background services by default without weird .profile hacks
 - Perhaps a sort of “App Store” setup where you could add things like docker or tailscale to install and then run by default
+
+[1]: https://developer.apple.com/documentation/virtualization
+[2]: https://docs.microsoft.com/windows/wsl/about
