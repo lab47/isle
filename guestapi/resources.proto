@@ -1,0 +1,106 @@
+syntax = "proto3";
+
+package dev.lab47.isle.guestapi;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+
+option go_package = "lab47.dev/isle/guestapi";
+
+message NetworkInfo {
+  string ipv4 = 1;
+  string ipv6 = 2;
+  repeated int32 ports = 3;
+}
+
+message ContainerInfo {
+  string image = 1;
+  repeated string command = 2;
+  google.protobuf.Timestamp started_at = 3;
+  int32 init_pid = 4;
+  string node_id = 5;
+}
+
+message ProvisionStatus {
+  Status status = 1;
+  NetworkInfo network_info = 2;
+  ContainerInfo container_info = 3;
+  string last_error = 4;
+
+  enum Status {
+    UNKNOWN = 0;
+    ADDING = 1;
+    RUNNING = 2;
+    SUSPENDED = 3;
+    DEAD = 4;
+  }
+}
+
+message ResourceId {
+  string category = 1;
+  string type = 2;
+  string unique_id = 3;
+}
+
+message ResourceIndexKey {
+  string category = 1;
+  string type = 2;
+  int32 field = 3;
+  google.protobuf.Value value = 4;
+  string unique_id = 5;
+}
+
+message Resource {
+  ResourceId id = 1;
+  google.protobuf.Any resource = 2;
+  ProvisionStatus provision_status = 3;
+}
+
+message CreateResourceReq {
+  google.protobuf.Any resource = 1;
+}
+
+message CreateResourceResp {
+  Resource resource = 1;
+}
+
+message UpdateResourceReq {
+  Resource resource = 1;
+}
+
+message UpdateResourceResp {
+  Resource resource = 1;
+}
+
+message ReadResourceReq {
+  ResourceId id = 1;
+}
+
+message ReadResourceResp {
+  Resource resource = 1;
+}
+
+message CheckProvisionReq {
+  ResourceId id = 1;
+}
+
+message CheckProvisionResp {
+  ProvisionStatus status = 1;
+}
+
+message DeleteResourceReq {
+  ResourceId id = 1;
+}
+
+message DeleteResourceResp {
+  Resource resource = 1;
+}
+
+service ResourceAPI {
+  rpc Create(CreateResourceReq) returns (CreateResourceResp);
+  rpc Update(UpdateResourceReq) returns (UpdateResourceResp);
+  rpc Read(ReadResourceReq) returns (ReadResourceResp);
+  rpc CheckProvision(CheckProvisionReq) returns (CheckProvisionResp);
+  rpc Delete(DeleteResourceReq) returns (DeleteResourceResp);
+}

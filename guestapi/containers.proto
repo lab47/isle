@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package dev.lab47.isle.guestapi;
+
+option go_package = "lab47.dev/isle/guestapi";
+
+message Container {
+  string image = 1;
+  repeated string command = 2;
+  map<string, string> environment = 3;
+  bool expose_ports = 4;
+
+  // Containers with stable names preserve their root filesystems
+  // across restarts. Stable names are unique.
+  string stable_name = 5;
+}

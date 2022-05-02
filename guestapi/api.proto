@@ -12,6 +12,14 @@ service GuestAPI {
   rpc TrimMemory(TrimMemoryReq) returns (TrimMemoryResp);
 }
 
+service HostAPI {
+  rpc RunOnMac(stream RunInput) returns (stream RunOutput);
+  rpc Running(RunningReq) returns (RunningResp);
+  rpc StartPortForward(StartPortForwardReq) returns (StartPortForwardResp);
+  rpc CancelPortForward(CancelPortForwardReq) returns (CancelPortForwardResp);
+  rpc TrimMemory(TrimMemoryReq) returns (TrimMemoryResp);
+}
+
 message AddAppReq {
   string name = 1;
   string selector = 2;
@@ -73,12 +81,4 @@ message TrimMemoryReq {
 
 message TrimMemoryResp {
   int32 total_memory = 1;
-}
-
-service HostAPI {
-  rpc RunOnMac(stream RunInput) returns (stream RunOutput);
-  rpc Running(RunningReq) returns (RunningResp);
-  rpc StartPortForward(StartPortForwardReq) returns (StartPortForwardResp);
-  rpc CancelPortForward(CancelPortForwardReq) returns (CancelPortForwardResp);
-  rpc TrimMemory(TrimMemoryReq) returns (TrimMemoryResp);
 }
