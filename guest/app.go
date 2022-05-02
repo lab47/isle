@@ -89,7 +89,7 @@ func (g *Guest) startApp(ctx context.Context, appPath string) {
 	go func() {
 		defer close(doneCh)
 
-		err = g.MonitorApp(ctx, appPath, cfg, id)
+		err := g.MonitorApp(ctx, cfg, id)
 		if err != nil {
 			if err != context.Canceled {
 				g.L.Error("error starting app", "error", err, "path", appPath)
@@ -99,6 +99,40 @@ func (g *Guest) startApp(ctx context.Context, appPath string) {
 		doneCh <- err
 	}()
 
+}
+
+func (g *Guest) StartConfig(ctx context.Context, id string, cfg *shardconfig.Config) {
+	if _, ok := g.detectedApps[id]; ok {
+		g.L.Debug("already running app, skipping", "id", id)
+		return
+	}
+
+	g.L.Info("starting app", "id", id)
+
+	ctx, cancel := context.WithCancel(ctx)
+
+	doneCh := make(chan error)
+
+	g.apps[cfg.Name] = &runningContainer{
+		id:     id,
+		cancel: cancel,
+		doneCh: doneCh,
+	}
+
+	g.detectedApps[id] = cfg.Name
+
+	go func() {
+		defer close(doneCh)
+
+		err := g.MonitorApp(ctx, cfg, id)
+		if err != nil {
+			if err != context.Canceled {
+				g.L.Error("error starting app", "error", err, "id", id)
+			}
+		}
+
+		doneCh <- err
+	}()
 }
 
 func (g *Guest) removeApp(ctx context.Context, appPath string) {
@@ -144,13 +178,13 @@ func (g *Guest) startAppsDir(ctx context.Context) {
 	}
 }
 
-func (g *Guest) MonitorApp(ctx context.Context, path string, cfg *shardconfig.Config, id string) error {
+func (g *Guest) MonitorApp(ctx context.Context, cfg *shardconfig.Config, id string) error {
 	errCh := make(chan error)
 
 	lastStart := time.Now()
 
 	go func() {
-		errCh <- g.StartApp(ctx, path, cfg, id)
+		errCh <- g.StartApp(ctx, cfg, id)
 	}()
 
 	for {
@@ -174,13 +208,13 @@ func (g *Guest) MonitorApp(ctx context.Context, path string, cfg *shardconfig.Co
 			}
 
 			go func() {
-				errCh <- g.StartApp(ctx, path, cfg, id)
+				errCh <- g.StartApp(ctx, cfg, id)
 			}()
 		}
 	}
 }
 
-func (g *Guest) StartApp(ctx context.Context, path string, cfg *shardconfig.Config, id string) error {
+func (g *Guest) StartApp(ctx context.Context, cfg *shardconfig.Config, id string) error {
 	started := make(chan string, 1)
 	errorer := make(chan error, 1)
 

@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package dev.lab47.isle.guestapi;
+
+option go_package = "lab47.dev/isle/guestapi";
+
+message PostgresServer {
+  string name = 2;
+  string version = 5;
+}
+
+message PostgresDatabase {
+  string server = 1;
+  string name = 2;
+  string user = 3;
+  string password = 4;
+}
+
