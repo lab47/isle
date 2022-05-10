@@ -111,7 +111,7 @@ func NewId(category, typ string) *guestapi.ResourceId {
 	return &guestapi.ResourceId{
 		Category: category,
 		Type:     typ,
-		UniqueId: ts.String(),
+		UniqueId: ts[:],
 	}
 }
 
@@ -188,6 +188,10 @@ func (r *ResourceStorage) SetSchema(category, typ string, msg proto.Message, fie
 		descs = append(descs, fd)
 	}
 
+	if r.schema == nil {
+		r.schema = map[string]*ResourceIndices{}
+	}
+
 	r.schema[category+"/"+typ] = &ResourceIndices{
 		Fields:  fieldDesc,
 		Indices: intfields,
@@ -243,6 +247,20 @@ func (r *ResourceStorage) Fetch(id *guestapi.ResourceId) (*guestapi.Resource, er
 	}
 
 	return &res, nil
+}
+
+func FetchAs[T proto.Message](r *ResourceContext, id *guestapi.ResourceId, val T) (*guestapi.Resource, error) {
+	res, err := r.Fetch(id)
+	if err != nil {
+		return nil, err
+	}
+
+	err = res.Resource.UnmarshalTo(val)
+	if err != nil {
+		return nil, err
+	}
+
+	return res, nil
 }
 
 func (r *ResourceStorage) FetchByIndex(key *guestapi.ResourceIndexKey) ([]*guestapi.Resource, error) {

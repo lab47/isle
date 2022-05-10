@@ -9,9 +9,11 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/containerd/containerd/archive"
@@ -19,33 +21,33 @@ import (
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/tarball"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
 	"github.com/lab47/isle/guestapi"
-	"github.com/lab47/isle/pkg/clog"
+	"github.com/lab47/isle/pkg/bridge"
 	"github.com/lab47/isle/pkg/netutil"
 	"github.com/lab47/isle/pkg/progressbar"
 	"github.com/lab47/isle/pkg/reaper"
 	"github.com/lab47/isle/pkg/runc"
+	"github.com/mr-tron/base58"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	"golang.org/x/sys/unix"
-	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type ContainerManager struct {
 	L hclog.Logger
 
-	basePath string
+	cfg ContainerConfig
 
-	nodeId        string
-	hostAddr      string
-	v6clusterAddr net.IP
-	v6subnetAddr  net.IP
+	nodeId   string
+	hostAddr string
+	// v6clusterAddr net.IP
+	// v6subnetAddr  net.IP
+	// v6gateway     net.IP
 
-	User         string
-	ClusterId    string
 	sshAgentPath string
 
 	cni       cni.CNI
@@ -60,27 +62,220 @@ type ContainerManager struct {
 	bgCancel func()
 
 	reaper *reaper.Monitor
+
+	containerSchema *Schema
+
+	cniEnv *netutil.CNIEnv
+
+	v4gateway net.IP
+	v4addrs   map[string]string
+
+	track containerTracker
+
+	runningMu sync.Mutex
+	running   map[string]func()
 }
 
-func (m *ContainerManager) Init(ctx *ResourceContext) error {
-	ctx.SetSchema("container", "container", &guestapi.Container{}, "StableName")
-	m.basePath = "/data/containers"
+type containerTracker struct {
+	mu   sync.Mutex
+	cond *sync.Cond
+
+	running int
+}
+
+func (c *containerTracker) Add() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.cond == nil {
+		c.cond = sync.NewCond(&c.mu)
+	}
+
+	c.running++
+}
+
+func (c *containerTracker) Done() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.running--
+	c.cond.Broadcast()
+}
+
+func (c *containerTracker) Wait() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for c.running > 0 {
+		c.cond.Wait()
+	}
+}
+
+const DefaultHelperPath = "/usr/bin/isle-helper"
+
+type ContainerConfig struct {
+	Logger  hclog.Logger
+	BaseDir string
+	HomeDir string
+	NodeId  string
+	User    string
+	// ClusterId string
+	// SubnetId  string
+	RuncRoot string
+	RunDir   string
+
+	BridgeID int
+
+	LayerCacheDir string
+
+	HelperPath string
+
+	NetworkManager *IPNetworkManager
+}
+
+func CNIEnv() (*netutil.CNIEnv, error) {
+	ce := &netutil.CNIEnv{
+		NetconfPath: "/etc/cni/net.d",
+	}
+
+	for _, path := range []string{"/usr/libexec/cni", "/usr/lib/cni"} {
+		if _, err := os.Stat(path); err == nil {
+			ce.Path = path
+			break
+		}
+	}
+
+	if ce.Path == "" {
+		return nil, fmt.Errorf("unable to find cni plugins")
+	}
+
+	return ce, nil
+}
+
+func (m *ContainerManager) Init(ctx *ResourceContext, cfg *ContainerConfig) error {
+	s, err := ctx.SetSchema("container", "container", &guestapi.Container{}, "stable_name", "image")
+	if err != nil {
+		return err
+	}
+
+	m.running = make(map[string]func())
+
+	m.cfg = *cfg
+
+	m.containerSchema = s
+	m.v4addrs = make(map[string]string)
+
+	m.L = cfg.Logger
+
+	ip := make(net.IP, net.IPv6len)
+	ip[0] = 0xfd
+
+	// data, err := hex.DecodeString(m.cfg.ClusterId)
+	// if err != nil {
+	// return err
+	// }
+
+	// copy(ip[1:], data)
+
+	// m.v6clusterAddr = ip
+
+	// m.v6subnetAddr = make(net.IP, net.IPv6len)
+	// copy(m.v6subnetAddr, ip)
+
+	// subnet := cfg.SubnetId
+
+	// if cfg.SubnetId != "" {
+	// data, err = hex.DecodeString(subnet)
+	// if err != nil {
+	// return err
+	// }
+	// } else {
+	// data = make([]byte, 2)
+	// _, err = io.ReadFull(rand.Reader, data)
+	// if err != nil {
+	// return err
+	// }
+
+	// subnet = hex.EncodeToString(data)
+	// }
+
+	// copy(m.v6subnetAddr[6:], data)
+
+	m.cniEnv, err = CNIEnv()
+	if err != nil {
+		return err
+	}
+
+	// v6gateway, _, err := net.ParseCIDR(m.v6subnetAddr.String() + "/64")
+	// if err != nil {
+	// return err
+	// }
+
+	/*
+		m.netconfig = ll
+
+		gc, err := cni.New(
+			cni.WithPluginDir([]string{m.cniEnv.Path}),
+			cni.WithConfListBytes(ll.Bytes),
+		)
+		if err != nil {
+			return err
+		}
+	*/
+
+	// v6gateway[len(v6gateway)-1] = 1
+	// m.v6gateway = v6gateway
+
+	// m.hostAddr = m.netconfig.GatewayV4
+	// m.cni = gc
+
+	bgCtx, bgCancel := context.WithCancel(ctx)
+	m.bgCtx = bgCtx
+	m.bgCancel = bgCancel
+
+	err = reaper.SetSubreaper(1)
+	if err != nil {
+		return err
+	}
+
+	m.reaper = reaper.Default
+
+	sigc := make(chan os.Signal, 128)
+	signal.Notify(sigc, unix.SIGCHLD)
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-sigc:
+				err := reaper.Reap()
+				if err != nil {
+					m.L.Error("error reaping child processes", "error", err)
+				}
+			}
+		}
+	}()
+
+	m.sshAgentPath = filepath.Join(m.cfg.RunDir, "ssh-agent-host.sock")
+
+	return nil
+}
+
+func (m *ContainerManager) Close() error {
+	m.bgCancel()
+	m.track.Wait()
 	return nil
 }
 
 func (m *ContainerManager) Create(ctx *ResourceContext, cont *guestapi.Container) (*guestapi.Resource, error) {
 	if cont.StableName != "" {
-		nameVal, err := structpb.NewValue(cont.StableName)
+		key, err := m.containerSchema.Key("stable_name", cont.StableName)
 		if err != nil {
 			return nil, err
 		}
 
-		resources, err := ctx.FetchByIndex(&guestapi.ResourceIndexKey{
-			Category: "container",
-			Type:     "container",
-			Value:    nameVal,
-		})
-
+		resources, err := ctx.FetchByIndex(key)
 		if err == nil {
 			return nil, err
 		}
@@ -90,20 +285,49 @@ func (m *ContainerManager) Create(ctx *ResourceContext, cont *guestapi.Container
 		}
 	}
 
-	id := NewId("container", "container")
+	id := m.containerSchema.NewId()
 
 	imgref, err := name.ParseReference(cont.Image)
 	if err != nil {
 		return nil, err
 	}
 
+	m.track.Add()
+
 	go func() {
-		err := m.startContainer(ctx, imgref, id, nil, 0)
+		defer m.track.Done()
+
+		goctx, cancel := context.WithCancel(m.bgCtx)
+
+		m.runningMu.Lock()
+		m.running[id.Short()] = cancel
+		m.runningMu.Unlock()
+
+		defer func() {
+			m.runningMu.Lock()
+			delete(m.running, id.Short())
+			m.runningMu.Unlock()
+
+			ctx.Delete(id)
+		}()
+
+		sub := &ResourceContext{
+			Context:         goctx,
+			ResourceStorage: ctx.ResourceStorage,
+		}
+
+		err := m.startContainer(sub, imgref, id, nil, 0, cont)
 		if err != nil {
-			m.L.Error("error creating container", "error", err, "id", id.UniqueId)
-			err = ctx.SetError(id, err)
-			if err != nil {
-				m.L.Error("error recording error on container", "error", err, "id", id.UniqueId)
+			if errors.Is(err, context.Canceled) {
+				ctx.UpdateProvision(id, &guestapi.ProvisionStatus{
+					Status: guestapi.ProvisionStatus_DEAD,
+				})
+			} else {
+				m.L.Error("error creating container", "error", err, "id", id.UniqueId)
+				err = ctx.SetError(id, err)
+				if err != nil {
+					m.L.Error("error recording error on container", "error", err, "id", id.UniqueId)
+				}
 			}
 		}
 	}()
@@ -130,59 +354,73 @@ func (m *ContainerManager) Delete(ctx *ResourceContext, res *guestapi.Resource, 
 		return err
 	}
 
-	pid := int(res.ProvisionStatus.ContainerInfo.InitPid)
-	if pid == 0 {
-		m.L.Warn("deleting container that has no init pid", "id", res.Id.UniqueId)
+	m.runningMu.Lock()
+	cancel, isRunning := m.running[res.Id.Short()]
+	m.runningMu.Unlock()
 
-		_, err := ctx.Delete(res.Id)
+	if !isRunning {
+		m.L.Warn("deleting container that is not running", "id", res.Id.UniqueId)
+
+		_, err = ctx.Delete(res.Id)
 		if err != nil {
 			m.L.Error("error deleting resource from store", "error", err)
 		}
+
+		return nil
 	}
 
-	go func() {
-		defer func() {
-			_, err := ctx.Delete(res.Id)
+	// We cancel it and let the monitoring goroutine perform the
+	// cleanup.
+	m.L.Debug("canceling context of running monitor to delete container")
+	cancel()
+
+	/*
+		pid := int(res.ProvisionStatus.ContainerInfo.InitPid)
+
+		go func() {
+			defer func() {
+				_, err := ctx.Delete(res.Id)
+				if err != nil {
+					m.L.Error("error deleting resource from store", "error", err)
+				}
+			}()
+
+			ch := m.reaper.Subscribe()
+			defer m.reaper.Unsubscribe(ch)
+
+			err = unix.Kill(pid, unix.SIGQUIT)
 			if err != nil {
-				m.L.Error("error deleting resource from store", "error", err)
+				m.L.Error("error sending kill signal", "error", err, "pid", pid)
+			}
+
+			timer := time.NewTicker(10 * time.Second)
+			defer timer.Stop()
+
+			var killed bool
+
+			for {
+				select {
+				case <-ctx.Done():
+					m.L.Debug("force killing pid due to context shutdown", "pid", pid)
+					unix.Kill(pid, unix.SIGKILL)
+					return
+				case <-timer.C:
+					if killed {
+						m.L.Error("killed container init, but never saw wait status", "pid", pid)
+						return
+					}
+
+					unix.Kill(pid, unix.SIGKILL)
+					killed = true
+				case es := <-ch:
+					if es.Pid == pid {
+						m.L.Debug("detected container has exited")
+						return
+					}
+				}
 			}
 		}()
-
-		ch := m.reaper.Subscribe()
-		defer m.reaper.Unsubscribe(ch)
-
-		err = unix.Kill(pid, unix.SIGQUIT)
-		if err != nil {
-			m.L.Error("error sending kill signal", "error", err, "pid", pid)
-		}
-
-		timer := time.NewTicker(10 * time.Second)
-		defer timer.Stop()
-
-		var killed bool
-
-		for {
-			select {
-			case <-ctx.Done():
-				m.L.Debug("force killing pid due to context shutdown", "pid", pid)
-				unix.Kill(pid, unix.SIGKILL)
-				return
-			case <-timer.C:
-				if killed {
-					m.L.Error("killed container init, but never saw wait status", "pid", pid)
-					return
-				}
-
-				unix.Kill(pid, unix.SIGKILL)
-				killed = true
-			case es := <-ch:
-				if es.Pid == pid {
-					m.L.Debug("detected container has exited")
-					return
-				}
-			}
-		}
-	}()
+	*/
 
 	return nil
 }
@@ -194,6 +432,10 @@ func init() {
 	)
 }
 
+type imageCache struct {
+	Digest string `json:"digest"`
+}
+
 func (m *ContainerManager) unpackOCI(
 	ctx context.Context,
 	img name.Reference,
@@ -201,17 +443,68 @@ func (m *ContainerManager) unpackOCI(
 	status io.Writer,
 	width int,
 ) (*v1.Config, error) {
-	rimg, err := remote.Image(img,
-		remote.WithPlatform(v1.Platform{
-			Architecture: runtime.GOARCH,
-			OS:           "linux",
-		}),
-	)
+	m.cfg.Logger.Debug("fetching image", "image", img.Name())
+
+	var input v1.Image
+
+	if m.cfg.LayerCacheDir != "" {
+		path := filepath.Join(m.cfg.LayerCacheDir, img.String()+".tar.gz")
+		tag, err := name.NewTag(img.Name())
+		if err != nil {
+			return nil, err
+		}
+
+		timg, err := tarball.ImageFromPath(path, &tag)
+		if err == nil {
+			m.L.Debug("using local cache", "path", path)
+			input = timg
+		} else {
+			m.L.Debug("unable to find cache of image, fetching remotely", "error", err)
+
+			rimg, err := remote.Image(img,
+				remote.WithPlatform(v1.Platform{
+					Architecture: runtime.GOARCH,
+					OS:           "linux",
+				}),
+			)
+			if err != nil {
+				return nil, err
+			}
+
+			err = tarball.WriteToFile(path, img, rimg)
+			if err != nil {
+				return nil, err
+			}
+
+			input, err = tarball.ImageFromPath(path, &tag)
+			if err == nil {
+				return nil, err
+			}
+		}
+	}
+
+	if input == nil {
+		rimg, err := remote.Image(img,
+			remote.WithPlatform(v1.Platform{
+				Architecture: runtime.GOARCH,
+				OS:           "linux",
+			}),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		input = rimg
+	}
+
+	dig, err := input.Digest()
 	if err != nil {
 		return nil, err
 	}
 
-	cfg, err := rimg.ConfigFile()
+	m.L.Debug("fetched image", "digest", dig.String())
+
+	cfg, err := input.ConfigFile()
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +514,7 @@ func (m *ContainerManager) unpackOCI(
 		return nil, err
 	}
 
-	layers, err := rimg.Layers()
+	layers, err := input.Layers()
 	if err != nil {
 		return nil, err
 	}
@@ -234,6 +527,8 @@ func (m *ContainerManager) unpackOCI(
 			max += sz
 		}
 	}
+
+	m.L.Debug("calculate image layers", "total-size", max, "layers", len(layers))
 
 	var bar *progressbar.ProgressBar
 
@@ -255,31 +550,93 @@ func (m *ContainerManager) unpackOCI(
 	}
 
 	for i, l := range layers {
-		r, err := l.Uncompressed()
+		err = func() error {
+			if m.cfg.LayerCacheDir != "" {
+				h, err := l.Digest()
+				if err != nil {
+					return err
+				}
+
+				cachePath := filepath.Join(m.cfg.LayerCacheDir, h.String())
+
+				f, err := os.Open(cachePath)
+				if err == nil {
+					defer f.Close()
+
+					_, err = archive.Apply(ctx, rootFsPath, f)
+					if err == nil {
+						return nil
+					}
+				}
+
+				r, err := l.Uncompressed()
+				if err != nil {
+					return err
+				}
+
+				defer r.Close()
+
+				var target io.Reader = r
+
+				cf, err := os.Create(cachePath)
+				if err != nil {
+					return err
+				}
+
+				defer cf.Close()
+
+				if bar != nil {
+					target = io.TeeReader(target, io.MultiWriter(bar, cf))
+				} else {
+					target = io.TeeReader(target, cf)
+				}
+
+				sz, err := archive.Apply(ctx, rootFsPath, target)
+				if err != nil {
+					return err
+				}
+
+				m.L.Info("unpacked layer for image", "image", img.Name(), "layer", i, "size", sz)
+
+				return nil
+			}
+
+			r, err := l.Uncompressed()
+			if err != nil {
+				return err
+			}
+
+			defer r.Close()
+
+			var target io.Reader = r
+
+			if bar != nil {
+				target = io.TeeReader(target, bar)
+			}
+
+			sz, err := archive.Apply(ctx, rootFsPath, target)
+			if err != nil {
+				return err
+			}
+
+			m.L.Info("unpacked layer for image", "image", img.Name(), "layer", i, "size", sz)
+
+			return nil
+		}()
+
 		if err != nil {
 			return nil, err
 		}
-
-		defer r.Close()
-
-		var target io.Reader = r
-
-		if bar != nil {
-			target = io.TeeReader(target, bar)
-		}
-
-		sz, err := archive.Apply(ctx, rootFsPath, target)
-		if err != nil {
-			return nil, err
-		}
-
-		m.L.Info("unpacked layer for image", "image", img.Name(), "layer", i, "size", sz)
 	}
 
-	bar.Finish()
+	if bar != nil {
+		bar.Finish()
+	}
 
 	return &cfg.Config, nil
 }
+
+const DefaultHome = "/vol/user/home"
 
 func (m *ContainerManager) startContainer(
 	ctx *ResourceContext,
@@ -287,11 +644,12 @@ func (m *ContainerManager) startContainer(
 	rid *guestapi.ResourceId,
 	status io.Writer,
 	width int,
+	cont *guestapi.Container,
 ) error {
-	id := rid.UniqueId
-	name := rid.UniqueId
+	id := rid.Short()
+	name := rid.Short()
 
-	bundlePath := filepath.Join(m.basePath, name)
+	bundlePath := filepath.Join(m.cfg.BaseDir, name)
 	rootFsPath := filepath.Join(bundlePath, "rootfs")
 
 	var cfg *v1.Config
@@ -322,29 +680,11 @@ func (m *ContainerManager) startContainer(
 		}
 	}
 
-	err := ioutil.WriteFile(
-		filepath.Join(bundlePath, "resolv.conf"),
-		[]byte(fmt.Sprintf("nameserver %s\n", m.hostAddr)), 0644)
-	if err != nil {
-		return err
-	}
-
-	err = ioutil.WriteFile(
-		filepath.Join(bundlePath, "hosts"),
-		[]byte(fmt.Sprintf(
-			"127.0.0.1\tlocalhost localhost.localdomain %s\n"+
-				"::1\tlocalhost localhost.localdomain %s\n"+
-				"192.168.64.1\tmac mac.internal host.internal\n",
-			name, name)), 0644)
-	if err != nil {
-		return err
-	}
-
-	volHome := "/vol/user/home/" + m.User
+	volHome := filepath.Join(m.cfg.HomeDir, m.cfg.User)
 
 	os.MkdirAll(filepath.Dir(volHome), 0755)
 
-	runDir := filepath.Join("/run", id)
+	runDir := filepath.Join(m.cfg.RunDir, id)
 
 	os.MkdirAll(runDir, 0777)
 	defer os.RemoveAll(runDir)
@@ -352,7 +692,58 @@ func (m *ContainerManager) startContainer(
 	// make sure that the rundir is properly setup
 	os.Chmod(runDir, 0777)
 
-	os.MkdirAll("/run/share", 0755)
+	shareDir := filepath.Join(m.cfg.RunDir, "share")
+
+	os.MkdirAll(shareDir, 0755)
+
+	ipam := &bridge.IPAM{}
+
+	ni := &guestapi.NetworkInfo{}
+
+	var hostAddr string
+
+	type allocatedAddr struct {
+		network *guestapi.ResourceId
+		address *net.IPNet
+	}
+
+	var allocatedAddrs []allocatedAddr
+
+	for _, nw := range cont.Networks {
+		allocs, err := m.cfg.NetworkManager.Allocate(ctx, nw, rid)
+		if err != nil {
+			return err
+		}
+
+		for _, alloc := range allocs {
+			ip := alloc.Address
+			gw := alloc.Gateway
+
+			ni.Addresses = append(ni.Addresses, guestapi.ToIPAddress(ip))
+
+			if gw.To4() == nil {
+				hostAddr = gw.String()
+			}
+
+			ipam.Addresses = append(ipam.Addresses, bridge.Address{
+				Address: *ip,
+				Gateway: gw,
+			})
+
+			allocatedAddrs = append(allocatedAddrs, allocatedAddr{
+				network: nw,
+				address: ip,
+			})
+		}
+	}
+
+	defer func() {
+		m.L.Debug("deallocating ip addresses")
+
+		for _, addr := range allocatedAddrs {
+			m.cfg.NetworkManager.Deallocate(ctx, addr.network, addr.address)
+		}
+	}()
 
 	s := specs.Spec{
 		Version: "1.0.2-dev",
@@ -453,7 +844,7 @@ func (m *ContainerManager) startContainer(
 			{
 				Destination: "/var/isle-containers",
 				Type:        "bind",
-				Source:      "/data/containers",
+				Source:      m.cfg.BaseDir,
 				Options:     []string{"rbind", "rshared", "ro"},
 			},
 			{
@@ -501,13 +892,13 @@ func (m *ContainerManager) startContainer(
 			{
 				Destination: "/dev/init",
 				Type:        "bind",
-				Source:      "/usr/bin/isle-helper",
+				Source:      m.cfg.HelperPath,
 				Options:     []string{"rbind", "rshared", "ro"},
 			},
 			{
 				Destination: "/bin/isle",
 				Type:        "bind",
-				Source:      "/usr/bin/isle-helper",
+				Source:      m.cfg.HelperPath,
 				Options:     []string{"rbind", "rshared", "ro"},
 			},
 			{
@@ -547,6 +938,24 @@ func (m *ContainerManager) startContainer(
 		},
 	}
 
+	err := ioutil.WriteFile(
+		filepath.Join(bundlePath, "resolv.conf"),
+		[]byte(fmt.Sprintf("nameserver %s\n", hostAddr)), 0644)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(
+		filepath.Join(bundlePath, "hosts"),
+		[]byte(fmt.Sprintf(
+			"127.0.0.1\tlocalhost localhost.localdomain %s\n"+
+				"::1\tlocalhost localhost.localdomain %s\n"+
+				"192.168.64.1\tmac mac.internal host.internal\n",
+			name, name)), 0644)
+	if err != nil {
+		return err
+	}
+
 	f, err := os.Create(filepath.Join(bundlePath, "config.json"))
 	if err != nil {
 		return err
@@ -562,6 +971,7 @@ func (m *ContainerManager) startContainer(
 	f.Close()
 
 	r := runc.Runc{
+		Root:  m.cfg.RuncRoot,
 		Debug: true,
 	}
 
@@ -569,22 +979,27 @@ func (m *ContainerManager) startContainer(
 
 	m.L.Info("creating container", "id", id)
 
-	dw, err := clog.NewDirectoryWriter(filepath.Join(bundlePath, "log"), 0, 0)
+	io, err := runc.NewSTDIO()
+
+	/*
+
+		dw, err := clog.NewDirectoryWriter(filepath.Join(bundlePath, "log"), 0, 0)
+		if err != nil {
+			return err
+		}
+
+		logw, err := dw.IOInput(ctx)
+		if err != nil {
+			return err
+		}
+
+		io, err := runc.SetOutputIO(logw)
+	*/
 	if err != nil {
 		return err
 	}
 
-	logw, err := dw.IOInput(ctx)
-	if err != nil {
-		return err
-	}
-
-	io, err := runc.SetOutputIO(logw)
-	if err != nil {
-		return err
-	}
-
-	pidPath := filepath.Join("/run", id+".pid")
+	pidPath := filepath.Join(m.cfg.RunDir, id+".pid")
 
 	os.RemoveAll(pidPath)
 	defer os.RemoveAll(pidPath)
@@ -635,17 +1050,12 @@ func (m *ContainerManager) startContainer(
 		// ok
 	}
 
-	m.L.Info("configuring networking")
-
 	h := sha256.New()
 	h.Write([]byte(name))
 
 	idBytes := h.Sum(nil)
 
-	v6addr := make(net.IP, net.IPv6len)
-	copy(v6addr, m.v6subnetAddr)
-
-	copy(v6addr[8:], idBytes[:8])
+	m.L.Info("configuring networking", "id", base58.Encode(idBytes))
 
 	hwaddr := make(net.HardwareAddr, 6)
 	copy(hwaddr, idBytes[2:])
@@ -654,17 +1064,49 @@ func (m *ContainerManager) startContainer(
 
 	mac := hwaddr.String()
 
-	m.L.Info("assigning container custom ipv6 address", "address", v6addr.String(), "mac", mac)
+	m.L.Info("assigning container addresses",
+		"pid", pid,
+		"mac", mac,
+	)
 
 	netPath := fmt.Sprintf("/proc/%d/ns/net", pid)
 
-	cniResult, err := m.cni.Setup(ctx, id, netPath,
-		cni.WithCapability("ips", []string{v6addr.String() + "/64"}),
-		cni.WithCapability("mac", mac),
-	)
-	if err != nil {
-		return err
+	bridgeConfig := &bridge.Config{
+		NetworkName: "isle",
+		NetNS:       netPath,
+		Bridge:      fmt.Sprintf("isle%d", m.cfg.BridgeID),
+		IfName:      "eth0",
+		ContainerID: id,
+		MAC:         hwaddr,
+		IPAM:        ipam,
 	}
+
+	err = bridge.Configure(ctx, m.L, bridgeConfig)
+	if err != nil {
+		return errors.Wrapf(err, "configuring container networking")
+	}
+
+	/*
+		ll, err := netutil.StaticConfigList(m.cniEnv, 2, ipv4addr, ipv6addr)
+		if err != nil {
+			return errors.Wrapf(err, "attempting to setup config list")
+		}
+
+		gc, err := cni.New(
+			cni.WithPluginDir([]string{m.cniEnv.Path}),
+			cni.WithConfListBytes(ll.Bytes),
+		)
+		if err != nil {
+			return err
+		}
+
+		cniResult, err := gc.Setup(ctx, id, netPath,
+			cni.WithCapability("mac", mac),
+		)
+		if err != nil {
+			return errors.Wrapf(err, "error configuring container networking: %s", id)
+		}
+	*/
 
 	var removedCNI bool
 	defer func() {
@@ -672,7 +1114,7 @@ func (m *ContainerManager) startContainer(
 			return
 		}
 
-		err := m.cni.Remove(ctx, id, netPath)
+		err := bridge.Delete(ctx, m.L, bridgeConfig)
 		m.L.Error("deleted cni for container", "id", id, "error", err)
 	}()
 
@@ -690,7 +1132,7 @@ func (m *ContainerManager) startContainer(
 	}
 
 	for i, str := range setup {
-		setup[i] = strings.ReplaceAll(str, "%user", m.User)
+		setup[i] = strings.ReplaceAll(str, "%user", m.cfg.User)
 	}
 
 	var setupSp specs.Process
@@ -705,47 +1147,49 @@ func (m *ContainerManager) startContainer(
 		return err
 	}
 
-	var target, target6 string
+	// target := ipv4addr.IP.String()
+	// target6 := ipv6addr.IP.String()
 
-	primary, ok := cniResult.Interfaces["eth0"]
-	if !ok {
-		m.L.Info("CNI failed to report an eth0")
-	} else {
-		for _, ipconfig := range primary.IPConfigs {
-			if ipconfig.IP.To4() != nil {
-				target = ipconfig.IP.String()
-			} else {
-				target6 = ipconfig.IP.String()
+	/*
+		var target, target6 string
+
+		primary, ok := cniResult.Interfaces["eth0"]
+		if !ok {
+			m.L.Info("CNI failed to report an eth0")
+		} else {
+			for _, ipconfig := range primary.IPConfigs {
+				if ipconfig.IP.To4() != nil {
+					target = ipconfig.IP.String()
+				} else {
+					target6 = ipconfig.IP.String()
+				}
 			}
 		}
+	*/
+
+	var addresses []string
+
+	for _, ip := range ipam.Addresses {
+		addresses = append(addresses, ip.Address.String())
 	}
 
-	ni := &guestapi.NetworkInfo{
-		Ipv4: target,
-		Ipv6: target6,
+	m.L.Info("networking configured", "addresses", addresses)
+
+	path := fmt.Sprintf("/proc/%d/net/tcp", pid)
+
+	m.L.Info("monitoring for ports", "path", path, "target", addresses[0])
+
+	pm := &portMonitor{
+		id:      rid,
+		log:     m.L,
+		api:     m.hostAPI,
+		sess:    m.currentSession,
+		network: ni,
+		target:  addresses[0],
+		path:    path,
 	}
 
-	if target == "" {
-		m.L.Info("CNI failed to report an IP, no port mapping enabled")
-	} else {
-		m.L.Info("networking configured", "ipv4", target, "ipv6", target6)
-
-		path := fmt.Sprintf("/proc/%d/net/tcp", pid)
-
-		m.L.Info("monitoring for ports", "path", path, "target", target)
-
-		pm := &portMonitor{
-			id:      rid,
-			log:     m.L,
-			api:     m.hostAPI,
-			sess:    m.currentSession,
-			network: ni,
-			target:  target,
-			path:    path,
-		}
-
-		go pm.start(ctx)
-	}
+	go pm.start(ctx)
 
 	var ms shareTracker
 
@@ -759,9 +1203,10 @@ func (m *ContainerManager) startContainer(
 		m.mountAd(&ms, id, ad)
 	}
 
-	ctx.UpdateProvision(rid, &guestapi.ProvisionStatus{
+	err = ctx.UpdateProvision(rid, &guestapi.ProvisionStatus{
 		Status: guestapi.ProvisionStatus_RUNNING,
 		ContainerInfo: &guestapi.ContainerInfo{
+			Id:        id,
 			Image:     img.Name(),
 			StartedAt: timestamppb.Now(),
 			InitPid:   int32(pid),
@@ -769,6 +1214,9 @@ func (m *ContainerManager) startContainer(
 		},
 		NetworkInfo: ni,
 	})
+	if err != nil {
+		m.L.Error("error updating provisioning", "error", err, "id", rid.String())
+	}
 
 	m.L.Warn("waiting for signal to stop container")
 
@@ -791,7 +1239,7 @@ loop:
 	finCtx := context.Background()
 
 	m.L.Warn("removing networking")
-	err = m.cni.Remove(finCtx, id, netPath)
+	err = bridge.Delete(finCtx, m.L, bridgeConfig)
 	if err != nil {
 		m.L.Error("error removing networking", "error", err)
 	}
@@ -829,7 +1277,7 @@ func (m *ContainerManager) mountAd(ms *shareTracker, id string, ad Advertisement
 			return
 		}
 
-		path := filepath.Join("/run", id, ad.Name)
+		path := filepath.Join(m.cfg.RunDir, id, ad.Name)
 		sourceRun := filepath.Join("/var/global-run", ad.Source, ad.Name)
 
 		err := os.Symlink(sourceRun, path)
@@ -848,9 +1296,49 @@ func (m *ContainerManager) mountAd(ms *shareTracker, id string, ad Advertisement
 func (m *ContainerManager) removeAd(ms *shareTracker, id string, ad Advertisement) {
 	switch ad := ad.(type) {
 	case *AdvertiseRun:
-		path := filepath.Join("/run", id, ad.Name)
+		path := filepath.Join(m.cfg.RunDir, id, ad.Name)
 		delete(ms.paths, path)
 
 		os.Remove(path)
 	}
+}
+
+var (
+	ErrNoContainer = errors.New("no container defined")
+)
+
+func (m *ContainerManager) Exec(ctx context.Context, res *guestapi.Resource, proc specs.Process) ([]byte, error) {
+	if res.ProvisionStatus.ContainerInfo == nil ||
+		res.ProvisionStatus.ContainerInfo.Id == "" {
+		return nil, ErrNoContainer
+	}
+
+	var r runc.Runc
+	r.Root = m.cfg.RuncRoot
+
+	pio, output, err := runc.CaptureIO()
+	if err != nil {
+		return nil, err
+	}
+
+	started := make(chan int, 1)
+
+	id := res.ProvisionStatus.ContainerInfo.Id
+
+	err = r.Exec(ctx, id, proc, &runc.ExecOpts{
+		IO:      pio,
+		Started: started,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-started:
+		// ok
+	}
+
+	return output.Bytes(), nil
 }

@@ -4,6 +4,8 @@ package dev.lab47.isle.guestapi;
 
 option go_package = "lab47.dev/isle/guestapi";
 
+import "resources.proto";
+
 message Container {
   string image = 1;
   repeated string command = 2;
@@ -13,4 +15,27 @@ message Container {
   // Containers with stable names preserve their root filesystems
   // across restarts. Stable names are unique.
   string stable_name = 5;
+
+  repeated ResourceId networks = 6;
+}
+
+message Route {
+  IPAddress destination = 1;
+  IPAddress target = 2;
+}
+
+message IPNetwork {
+  string name = 1;
+
+  IPAddress ipv4_block = 2;
+  IPAddress ipv6_block = 3;
+
+  IPAddress ipv4_gateway = 4;
+  IPAddress ipv6_gateway = 5;
+
+  LiveData data = 50;
+
+  message LiveData {
+    map<string, ResourceId> allocated = 2;
+  }
 }

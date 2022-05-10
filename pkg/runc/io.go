@@ -17,6 +17,7 @@
 package runc
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"os/exec"
@@ -82,6 +83,40 @@ func (p *pipe) Close() error {
 // on Windows.
 func NewPipeIO(uid, gid int, opts ...IOOpt) (i IO, err error) {
 	return newPipeIO(uid, gid, opts...)
+}
+
+func CaptureIO() (IO, *bytes.Buffer, error) {
+	buf := new(bytes.Buffer)
+
+	return &capture{
+		buf: buf,
+	}, buf, nil
+
+}
+
+type capture struct {
+	buf *bytes.Buffer
+}
+
+func (s *capture) Close() error {
+	return nil
+}
+
+func (s *capture) Set(cmd *exec.Cmd) {
+	cmd.Stdout = s.buf
+	cmd.Stderr = s.buf
+}
+
+func (s *capture) Stdin() io.WriteCloser {
+	return os.Stdin
+}
+
+func (s *capture) Stdout() io.ReadCloser {
+	return os.Stdout
+}
+
+func (s *capture) Stderr() io.ReadCloser {
+	return os.Stderr
 }
 
 func NewOutputIO() (IO, io.ReadCloser, error) {
