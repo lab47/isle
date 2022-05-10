@@ -11,6 +11,10 @@ import (
 func InitMain() {
 	signal.Ignore(unix.SIGPIPE, unix.SIGINT)
 
+	exitCh := make(chan os.Signal, 1)
+
+	signal.Notify(exitCh, unix.SIGQUIT)
+
 	ch := make(chan os.Signal, 1)
 
 	signal.Notify(ch, unix.SIGCHLD)
@@ -23,6 +27,8 @@ func InitMain() {
 			//ok
 		case <-tick.C:
 			// ok
+		case <-exitCh:
+			os.Exit(1)
 		}
 
 		var (

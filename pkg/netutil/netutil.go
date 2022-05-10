@@ -105,6 +105,40 @@ func GenerateIPAM(driver string, v4subnet, v6subnet string) (map[string]interfac
 
 		gw4 = ipamRange.Gateway
 		gw6 = ipamRange6.Gateway
+	case "static":
+		_, subnet4, err := net.ParseCIDR(v4subnet)
+		if err != nil {
+			return nil, "", "", err
+		}
+
+		_, subnet6, err := net.ParseCIDR(v6subnet)
+		if err != nil {
+			return nil, "", "", err
+		}
+
+		ipgw4, _ := firstIPInSubnet(subnet4)
+		ipgw6, _ := firstIPInSubnet(subnet6)
+
+		gw4 = ipgw4.String()
+		gw6 = ipgw6.String()
+
+		ipamConf := newStaticIPAMConfig()
+		ipamConf.Routes = []IPAMRoute{
+			{Dst: "0.0.0.0/0"},
+			{Dst: "::/0"},
+		}
+		ipamConf.Addresses = []StaticAddress{
+			{
+				Address: v4subnet,
+				Gateway: gw4,
+			},
+			{
+				Address: v6subnet,
+				Gateway: gw6,
+			},
+		}
+
+		ipamConfig = ipamConf
 	default:
 		return nil, "", "", fmt.Errorf("unsupported ipam driver %q", driver)
 	}
@@ -140,6 +174,18 @@ func DefaultConfigList(e *CNIEnv, v6addr string) (*NetworkConfigList, error) {
 		panic(err)
 	}
 	return GenerateConfigList(e, nil, DefaultID, DefaultNetworkName, gw4, gw6, plugins)
+}
+
+func StaticConfigList(e *CNIEnv, bridgeId int, v4addr string, v6addr string) (*NetworkConfigList, error) {
+	ipam, gw4, gw6, err := GenerateIPAM("static", v4addr, v6addr)
+	if err != nil {
+		panic(err)
+	}
+	plugins, err := GenerateCNIPlugins(DefaultNetworkName, bridgeId, ipam, nil)
+	if err != nil {
+		panic(err)
+	}
+	return GenerateConfigList(e, nil, bridgeId, DefaultNetworkName, gw4, gw6, plugins)
 }
 
 type cniNetworkConfig struct {

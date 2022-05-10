@@ -171,3 +171,20 @@ func newDHCPIPAMConfig() *dhcpIPAMConfig {
 		Type: "dhcp",
 	}
 }
+
+type StaticAddress struct {
+	Address string `json:"address"`
+	Gateway string `json:"gateway"`
+}
+
+type staticIPAMConfig struct {
+	Type      string          `json:"static"`
+	Addresses []StaticAddress `json:"addresses"`
+	Routes    []IPAMRoute     `json:"routes,omitempty"`
+}
+
+func newStaticIPAMConfig() *staticIPAMConfig {
+	return &staticIPAMConfig{
+		Type: "static",
+	}
+}

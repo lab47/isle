@@ -96,7 +96,11 @@ type Guest struct {
 }
 
 func newUniqueId() string {
-	data := make([]byte, 5)
+	return newHexId(5)
+}
+
+func newHexId(sz int) string {
+	data := make([]byte, sz)
 	io.ReadFull(rand.Reader, data)
 
 	return hex.EncodeToString(data)
