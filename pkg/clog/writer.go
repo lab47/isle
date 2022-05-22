@@ -18,7 +18,6 @@ import (
 
 type Writer struct {
 	w io.Writer
-	b *bufio.Writer
 	e *cbor.Encoder
 
 	st sizeTracker
@@ -27,10 +26,9 @@ type Writer struct {
 func NewWriter(w io.Writer) (*Writer, error) {
 	cw := &Writer{
 		w: w,
-		b: bufio.NewWriter(w),
 	}
 
-	cw.e = cbor.NewEncoder(io.MultiWriter(cw.b, &cw.st))
+	cw.e = cbor.NewEncoder(io.MultiWriter(cw.w, &cw.st))
 
 	return cw, nil
 }
@@ -50,7 +48,7 @@ func (w *Writer) Write(line string) error {
 }
 
 func (w *Writer) Flush() error {
-	return w.b.Flush()
+	return nil
 }
 
 type DirectoryWriter struct {

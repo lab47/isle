@@ -12,12 +12,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/containerd/console"
 	"github.com/containerd/containerd/archive"
-	"github.com/containerd/go-cni"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -26,6 +28,7 @@ import (
 	"github.com/hashicorp/yamux"
 	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/pkg/bridge"
+	"github.com/lab47/isle/pkg/clog"
 	"github.com/lab47/isle/pkg/netutil"
 	"github.com/lab47/isle/pkg/progressbar"
 	"github.com/lab47/isle/pkg/reaper"
@@ -42,16 +45,9 @@ type ContainerManager struct {
 
 	cfg ContainerConfig
 
-	nodeId   string
-	hostAddr string
-	// v6clusterAddr net.IP
-	// v6subnetAddr  net.IP
-	// v6gateway     net.IP
-
+	nodeId       string
+	hostAddr     string
 	sshAgentPath string
-
-	cni       cni.CNI
-	netconfig *netutil.NetworkConfigList
 
 	currentSession *yamux.Session
 
@@ -64,11 +60,6 @@ type ContainerManager struct {
 	reaper *reaper.Monitor
 
 	containerSchema *Schema
-
-	cniEnv *netutil.CNIEnv
-
-	v4gateway net.IP
-	v4addrs   map[string]string
 
 	track containerTracker
 
@@ -163,71 +154,11 @@ func (m *ContainerManager) Init(ctx *ResourceContext, cfg *ContainerConfig) erro
 	m.cfg = *cfg
 
 	m.containerSchema = s
-	m.v4addrs = make(map[string]string)
 
 	m.L = cfg.Logger
 
 	ip := make(net.IP, net.IPv6len)
 	ip[0] = 0xfd
-
-	// data, err := hex.DecodeString(m.cfg.ClusterId)
-	// if err != nil {
-	// return err
-	// }
-
-	// copy(ip[1:], data)
-
-	// m.v6clusterAddr = ip
-
-	// m.v6subnetAddr = make(net.IP, net.IPv6len)
-	// copy(m.v6subnetAddr, ip)
-
-	// subnet := cfg.SubnetId
-
-	// if cfg.SubnetId != "" {
-	// data, err = hex.DecodeString(subnet)
-	// if err != nil {
-	// return err
-	// }
-	// } else {
-	// data = make([]byte, 2)
-	// _, err = io.ReadFull(rand.Reader, data)
-	// if err != nil {
-	// return err
-	// }
-
-	// subnet = hex.EncodeToString(data)
-	// }
-
-	// copy(m.v6subnetAddr[6:], data)
-
-	m.cniEnv, err = CNIEnv()
-	if err != nil {
-		return err
-	}
-
-	// v6gateway, _, err := net.ParseCIDR(m.v6subnetAddr.String() + "/64")
-	// if err != nil {
-	// return err
-	// }
-
-	/*
-		m.netconfig = ll
-
-		gc, err := cni.New(
-			cni.WithPluginDir([]string{m.cniEnv.Path}),
-			cni.WithConfListBytes(ll.Bytes),
-		)
-		if err != nil {
-			return err
-		}
-	*/
-
-	// v6gateway[len(v6gateway)-1] = 1
-	// m.v6gateway = v6gateway
-
-	// m.hostAddr = m.netconfig.GatewayV4
-	// m.cni = gc
 
 	bgCtx, bgCancel := context.WithCancel(ctx)
 	m.bgCtx = bgCtx
@@ -308,7 +239,7 @@ func (m *ContainerManager) Create(ctx *ResourceContext, cont *guestapi.Container
 			delete(m.running, id.Short())
 			m.runningMu.Unlock()
 
-			ctx.Delete(id)
+			ctx.Delete(ctx, id)
 		}()
 
 		sub := &ResourceContext{
@@ -319,12 +250,12 @@ func (m *ContainerManager) Create(ctx *ResourceContext, cont *guestapi.Container
 		err := m.startContainer(sub, imgref, id, nil, 0, cont)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
-				ctx.UpdateProvision(id, &guestapi.ProvisionStatus{
+				ctx.UpdateProvision(ctx, id, &guestapi.ProvisionStatus{
 					Status: guestapi.ProvisionStatus_DEAD,
 				})
 			} else {
 				m.L.Error("error creating container", "error", err, "id", id.UniqueId)
-				err = ctx.SetError(id, err)
+				err = ctx.SetError(ctx, id, err)
 				if err != nil {
 					m.L.Error("error recording error on container", "error", err, "id", id.UniqueId)
 				}
@@ -336,7 +267,7 @@ func (m *ContainerManager) Create(ctx *ResourceContext, cont *guestapi.Container
 		Status: guestapi.ProvisionStatus_ADDING,
 	}
 
-	return ctx.Set(id, cont, prov)
+	return ctx.Set(ctx, id, cont, prov)
 }
 
 func (m *ContainerManager) Update(ctx *ResourceContext, res *guestapi.Resource) (*guestapi.Resource, error) {
@@ -349,7 +280,7 @@ func (m *ContainerManager) Read(ctx *ResourceContext, id *guestapi.ResourceId) (
 
 func (m *ContainerManager) Delete(ctx *ResourceContext, res *guestapi.Resource, cont *guestapi.Container) error {
 	res.ProvisionStatus.Status = guestapi.ProvisionStatus_DEAD
-	err := ctx.UpdateProvision(res.Id, res.ProvisionStatus)
+	err := ctx.UpdateProvision(ctx, res.Id, res.ProvisionStatus)
 	if err != nil {
 		return err
 	}
@@ -361,7 +292,7 @@ func (m *ContainerManager) Delete(ctx *ResourceContext, res *guestapi.Resource, 
 	if !isRunning {
 		m.L.Warn("deleting container that is not running", "id", res.Id.UniqueId)
 
-		_, err = ctx.Delete(res.Id)
+		_, err = ctx.Delete(ctx, res.Id)
 		if err != nil {
 			m.L.Error("error deleting resource from store", "error", err)
 		}
@@ -373,54 +304,6 @@ func (m *ContainerManager) Delete(ctx *ResourceContext, res *guestapi.Resource, 
 	// cleanup.
 	m.L.Debug("canceling context of running monitor to delete container")
 	cancel()
-
-	/*
-		pid := int(res.ProvisionStatus.ContainerInfo.InitPid)
-
-		go func() {
-			defer func() {
-				_, err := ctx.Delete(res.Id)
-				if err != nil {
-					m.L.Error("error deleting resource from store", "error", err)
-				}
-			}()
-
-			ch := m.reaper.Subscribe()
-			defer m.reaper.Unsubscribe(ch)
-
-			err = unix.Kill(pid, unix.SIGQUIT)
-			if err != nil {
-				m.L.Error("error sending kill signal", "error", err, "pid", pid)
-			}
-
-			timer := time.NewTicker(10 * time.Second)
-			defer timer.Stop()
-
-			var killed bool
-
-			for {
-				select {
-				case <-ctx.Done():
-					m.L.Debug("force killing pid due to context shutdown", "pid", pid)
-					unix.Kill(pid, unix.SIGKILL)
-					return
-				case <-timer.C:
-					if killed {
-						m.L.Error("killed container init, but never saw wait status", "pid", pid)
-						return
-					}
-
-					unix.Kill(pid, unix.SIGKILL)
-					killed = true
-				case es := <-ch:
-					if es.Pid == pid {
-						m.L.Debug("detected container has exited")
-						return
-					}
-				}
-			}
-		}()
-	*/
 
 	return nil
 }
@@ -971,33 +854,37 @@ func (m *ContainerManager) startContainer(
 	f.Close()
 
 	r := runc.Runc{
-		Root:  m.cfg.RuncRoot,
-		Debug: true,
+		Root: m.cfg.RuncRoot,
 	}
 
 	started := make(chan int, 1)
 
 	m.L.Info("creating container", "id", id)
 
-	io, err := runc.NewSTDIO()
-
-	/*
-
-		dw, err := clog.NewDirectoryWriter(filepath.Join(bundlePath, "log"), 0, 0)
-		if err != nil {
-			return err
-		}
-
-		logw, err := dw.IOInput(ctx)
-		if err != nil {
-			return err
-		}
-
-		io, err := runc.SetOutputIO(logw)
-	*/
+	dw, err := clog.NewDirectoryWriter(filepath.Join(bundlePath, "log"), 0, 0)
 	if err != nil {
 		return err
 	}
+
+	defer dw.Flush()
+
+	logw, err := dw.IOInput(ctx)
+	if err != nil {
+		return err
+	}
+
+	io, err := runc.SetOutputIO(logw)
+	if err != nil {
+		return err
+	}
+
+	ilog := hclog.New(&hclog.LoggerOptions{
+		Name:   id,
+		Level:  hclog.Trace,
+		Output: logw,
+	})
+
+	ilog.Info("creating container", "id", id)
 
 	pidPath := filepath.Join(m.cfg.RunDir, id+".pid")
 
@@ -1050,6 +937,8 @@ func (m *ContainerManager) startContainer(
 		// ok
 	}
 
+	ilog.Info("container started", "pid", pid)
+
 	h := sha256.New()
 	h.Write([]byte(name))
 
@@ -1085,28 +974,6 @@ func (m *ContainerManager) startContainer(
 	if err != nil {
 		return errors.Wrapf(err, "configuring container networking")
 	}
-
-	/*
-		ll, err := netutil.StaticConfigList(m.cniEnv, 2, ipv4addr, ipv6addr)
-		if err != nil {
-			return errors.Wrapf(err, "attempting to setup config list")
-		}
-
-		gc, err := cni.New(
-			cni.WithPluginDir([]string{m.cniEnv.Path}),
-			cni.WithConfListBytes(ll.Bytes),
-		)
-		if err != nil {
-			return err
-		}
-
-		cniResult, err := gc.Setup(ctx, id, netPath,
-			cni.WithCapability("mac", mac),
-		)
-		if err != nil {
-			return errors.Wrapf(err, "error configuring container networking: %s", id)
-		}
-	*/
 
 	var removedCNI bool
 	defer func() {
@@ -1147,26 +1014,6 @@ func (m *ContainerManager) startContainer(
 		return err
 	}
 
-	// target := ipv4addr.IP.String()
-	// target6 := ipv6addr.IP.String()
-
-	/*
-		var target, target6 string
-
-		primary, ok := cniResult.Interfaces["eth0"]
-		if !ok {
-			m.L.Info("CNI failed to report an eth0")
-		} else {
-			for _, ipconfig := range primary.IPConfigs {
-				if ipconfig.IP.To4() != nil {
-					target = ipconfig.IP.String()
-				} else {
-					target6 = ipconfig.IP.String()
-				}
-			}
-		}
-	*/
-
 	var addresses []string
 
 	for _, ip := range ipam.Addresses {
@@ -1174,6 +1021,8 @@ func (m *ContainerManager) startContainer(
 	}
 
 	m.L.Info("networking configured", "addresses", addresses)
+
+	ilog.Info("configured networking", "addresses", strings.Join(addresses, ", "))
 
 	path := fmt.Sprintf("/proc/%d/net/tcp", pid)
 
@@ -1203,7 +1052,7 @@ func (m *ContainerManager) startContainer(
 		m.mountAd(&ms, id, ad)
 	}
 
-	err = ctx.UpdateProvision(rid, &guestapi.ProvisionStatus{
+	err = ctx.UpdateProvision(ctx, rid, &guestapi.ProvisionStatus{
 		Status: guestapi.ProvisionStatus_RUNNING,
 		ContainerInfo: &guestapi.ContainerInfo{
 			Id:        id,
@@ -1219,6 +1068,8 @@ func (m *ContainerManager) startContainer(
 	}
 
 	m.L.Warn("waiting for signal to stop container")
+
+	ilog.Info("container running")
 
 loop:
 	for {
@@ -1341,4 +1192,237 @@ func (m *ContainerManager) Exec(ctx context.Context, res *guestapi.Resource, pro
 	}
 
 	return output.Bytes(), nil
+}
+
+type ExecSession struct {
+	Stdout io.Reader
+	Stderr io.Reader
+	Stdin  io.Writer
+
+	Pid  int
+	Done chan runc.Exit
+}
+
+func (m *ContainerManager) ExecToStream(ctx context.Context, res *guestapi.Resource, proc specs.Process) (*ExecSession, error) {
+	if res.ProvisionStatus.ContainerInfo == nil ||
+		res.ProvisionStatus.ContainerInfo.Id == "" {
+		return nil, ErrNoContainer
+	}
+
+	var r runc.Runc
+	r.Root = m.cfg.RuncRoot
+	r.Debug = true
+
+	pio, err := runc.NewPipeIO(int(proc.User.UID), int(proc.User.GID))
+	if err != nil {
+		return nil, err
+	}
+
+	started := make(chan int, 1)
+
+	id := res.ProvisionStatus.ContainerInfo.Id
+
+	tmpdir, err := ioutil.TempDir("", "isle-shell")
+	if err != nil {
+		return nil, err
+	}
+
+	defer os.RemoveAll(tmpdir)
+
+	pidPath := filepath.Join(tmpdir, "pid")
+
+	m.L.Trace("executing proc via runc", "spec", spew.Sdump(proc))
+
+	err = r.Exec(ctx, id, proc, &runc.ExecOpts{
+		IO:      pio,
+		Detach:  true,
+		Started: started,
+		PidFile: pidPath,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-started:
+		// ok
+	}
+
+	data, err := ioutil.ReadFile(pidPath)
+	if err != nil {
+		return nil, err
+	}
+
+	processPid, err := strconv.Atoi(string(data))
+	if err != nil {
+		return nil, err
+	}
+
+	m.L.Info("command running", "pid", processPid)
+
+	ch := m.reaper.Subscribe()
+	defer m.reaper.Unsubscribe(ch)
+
+	done := make(chan runc.Exit, 1)
+
+	go func() {
+		defer close(done)
+
+		select {
+		case <-ctx.Done():
+			return
+		case exit := <-ch:
+			if exit.Pid == processPid {
+				done <- exit
+			}
+		}
+	}()
+
+	ts := &ExecSession{
+		Stdin:  pio.Stdin(),
+		Stderr: pio.Stderr(),
+		Stdout: pio.Stdout(),
+		Pid:    processPid,
+		Done:   done,
+	}
+
+	return ts, nil
+}
+
+type TerminalSession struct {
+	console.Console
+
+	Pid  int
+	Done chan runc.Exit
+}
+
+func (m *ContainerManager) ExecInTerminal(ctx context.Context, res *guestapi.Resource, proc specs.Process) (*TerminalSession, error) {
+	if res.ProvisionStatus.ContainerInfo == nil ||
+		res.ProvisionStatus.ContainerInfo.Id == "" {
+		return nil, ErrNoContainer
+	}
+
+	var r runc.Runc
+	r.Root = m.cfg.RuncRoot
+
+	pio, err := runc.NewSTDIO()
+	if err != nil {
+		return nil, err
+	}
+
+	started := make(chan int, 1)
+
+	id := res.ProvisionStatus.ContainerInfo.Id
+	consock, err := runc.NewTempConsoleSocket()
+	if err != nil {
+		return nil, err
+	}
+
+	tmpdir, err := ioutil.TempDir("", "isle-shell")
+	if err != nil {
+		return nil, err
+	}
+
+	defer os.RemoveAll(tmpdir)
+
+	pidPath := filepath.Join(tmpdir, "pid")
+
+	proc.Terminal = true
+
+	err = r.Exec(ctx, id, proc, &runc.ExecOpts{
+		IO:            pio,
+		ConsoleSocket: consock,
+		Detach:        true,
+		Started:       started,
+		Terminal:      true,
+		PidFile:       pidPath,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-started:
+		// ok
+	}
+
+	con, err := consock.ReceiveMaster()
+	if err != nil {
+		return nil, err
+	}
+
+	m.L.Info("reading pid file")
+
+	data, err := ioutil.ReadFile(pidPath)
+	if err != nil {
+		return nil, err
+	}
+
+	processPid, err := strconv.Atoi(string(data))
+	if err != nil {
+		return nil, err
+	}
+
+	m.L.Info("command running", "pid", processPid)
+
+	ch := m.reaper.Subscribe()
+	defer m.reaper.Unsubscribe(ch)
+
+	done := make(chan runc.Exit, 1)
+
+	go func() {
+		defer close(done)
+
+		select {
+		case <-ctx.Done():
+			return
+		case exit := <-ch:
+			if exit.Pid == processPid {
+				done <- exit
+			}
+		}
+	}()
+
+	ts := &TerminalSession{
+		Console: con,
+		Pid:     processPid,
+		Done:    done,
+	}
+
+	return ts, nil
+}
+
+func (m *ContainerManager) Logs(ctx context.Context, res *guestapi.Resource, ch chan *clog.Entry) error {
+	id := res.Id.Short()
+
+	logPath := filepath.Join(m.cfg.BaseDir, id, "log")
+
+	r, err := clog.NewDirectoryReader(logPath)
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		defer close(ch)
+
+		for {
+			ent, err := r.Next()
+			if err != nil {
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case ch <- ent:
+				//ok
+			}
+		}
+	}()
+
+	return nil
 }

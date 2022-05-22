@@ -14,6 +14,7 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/guestapi"
+	"github.com/lab47/isle/pkg/clog"
 	"github.com/lab47/isle/pkg/netutil"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
@@ -71,9 +72,9 @@ func TestContainers(t *testing.T) {
 		defer db.Close()
 
 		var r ResourceStorage
-		r.db = db
+		r.log = log
 
-		err = r.Init()
+		err = r.Init(db)
 		require.NoError(t, err)
 
 		top, cancel := context.WithCancel(context.Background())
@@ -229,5 +230,21 @@ func TestContainers(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.Empty(t, lookingFor, "not all addresess were bound")
+
+		ch := make(chan *clog.Entry)
+
+		err = cm.Logs(ctx, res, ch)
+		require.NoError(t, err)
+
+		var logs []*clog.Entry
+
+		for ent := range ch {
+			logs = append(logs, ent)
+		}
+
+		assert.Len(t, logs, 4)
+
+		assert.Contains(t, logs[0].Data, "creating container")
+		assert.Contains(t, logs[3].Data, "container running")
 	})
 }

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/fxamacker/cbor/v2"
+	"github.com/pkg/errors"
 )
 
 type Reader struct {
@@ -60,7 +61,7 @@ func (d *DirectoryReader) openNext() error {
 
 	entries, err := ioutil.ReadDir(d.dir)
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "attempting to read directory: %s", d.dir)
 	}
 
 	var target string
@@ -82,7 +83,7 @@ func (d *DirectoryReader) openNext() error {
 	}
 
 	if target == "" {
-		return io.EOF
+		return errors.Wrapf(io.EOF, "no more files to read. cur=%s", d.cur)
 	}
 
 	f, err := os.Open(filepath.Join(d.dir, target))

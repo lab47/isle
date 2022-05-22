@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/guestapi"
 	"github.com/oklog/ulid"
 	"github.com/pkg/errors"
@@ -16,6 +17,11 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/structpb"
 )
+
+type ProvisionChange struct {
+	Id     *guestapi.ResourceId
+	Status *guestapi.ProvisionStatus
+}
 
 type ResourceContext struct {
 	context.Context
@@ -122,9 +128,18 @@ type ResourceIndices struct {
 }
 
 type ResourceStorage struct {
-	db *bbolt.DB
+	log hclog.Logger
+	db  *bbolt.DB
 
 	schema map[string]*ResourceIndices
+
+	watchers map[string][]chan struct{}
+
+	provChange *Signal[ProvisionChange]
+}
+
+func (r *ResourceStorage) ProvisionChangeSelector() *Signal[ProvisionChange] {
+	return r.provChange
 }
 
 type Schema struct {
@@ -145,8 +160,8 @@ func (s *Schema) Key(name string, val interface{}) (*guestapi.ResourceIndexKey, 
 	}
 
 	return &guestapi.ResourceIndexKey{
-		Category: "container",
-		Type:     "container",
+		Category: s.Category,
+		Type:     s.Type,
 		Field:    field,
 		Value:    sval,
 	}, nil
@@ -201,8 +216,12 @@ func (r *ResourceStorage) SetSchema(category, typ string, msg proto.Message, fie
 	return sch, nil
 }
 
-func (r *ResourceStorage) Init() error {
+func (r *ResourceStorage) Init(db *bbolt.DB) error {
+	r.db = db
 	r.schema = make(map[string]*ResourceIndices)
+	r.watchers = make(map[string][]chan struct{})
+
+	r.provChange = NewSignal[ProvisionChange]()
 
 	return r.db.Update(func(tx *bbolt.Tx) error {
 		_, err := tx.CreateBucketIfNotExists(resBucket)
@@ -319,7 +338,7 @@ func (r *ResourceStorage) FetchByIndex(key *guestapi.ResourceIndexKey) ([]*guest
 	return resources, nil
 }
 
-func (r *ResourceStorage) Set(id *guestapi.ResourceId, msg proto.Message, prov *guestapi.ProvisionStatus) (*guestapi.Resource, error) {
+func (r *ResourceStorage) Set(ctx context.Context, id *guestapi.ResourceId, msg proto.Message, prov *guestapi.ProvisionStatus) (*guestapi.Resource, error) {
 	resAny, err := anypb.New(msg)
 	if err != nil {
 		return nil, err
@@ -347,25 +366,36 @@ func (r *ResourceStorage) Set(id *guestapi.ResourceId, msg proto.Message, prov *
 			return err
 		}
 
+		existingRes := &guestapi.Resource{}
+		existing := msg.ProtoReflect().New()
+
+		var update bool
+		if existingData != nil {
+			update = true
+
+			err := proto.Unmarshal(existingData, existingRes)
+			if err != nil {
+				return errors.Wrapf(err, "attempting to unmarshaling existing entry for key")
+			}
+
+			existingRes.Resource.UnmarshalTo(existing.Interface())
+
+			if !proto.Equal(prov, existingRes.ProvisionStatus) {
+				defer func() {
+					go r.provChange.Emit(ctx, id.Short(), ProvisionChange{
+						Id:     id,
+						Status: prov,
+					})
+				}()
+			}
+		}
+
 		indices := r.schema[id.Category+"/"+id.Type]
 
 		if indices != nil {
+			r.log.Trace("detected indexes", "category", id.Category, "type", id.Type)
+
 			idxBucket := tx.Bucket(resIndexBucket)
-
-			existingRes := &guestapi.Resource{}
-			existing := msg.ProtoReflect().New()
-
-			var update bool
-			if existingData != nil {
-				update = true
-
-				err := proto.Unmarshal(existingData, existingRes)
-				if err != nil {
-					return errors.Wrapf(err, "attempting to unmarshaling existing entry for key")
-				}
-
-				existingRes.Resource.UnmarshalTo(existing.Interface())
-			}
 
 			for _, desc := range indices.Descs {
 				val := msg.ProtoReflect().Get(desc)
@@ -416,6 +446,8 @@ func (r *ResourceStorage) Set(id *guestapi.ResourceId, msg proto.Message, prov *
 					Value:    sval,
 					UniqueId: id.UniqueId,
 				}
+
+				r.log.Trace("storing key for index", "index-name", desc.Name(), "value", valI)
 
 				dataKey, err := proto.Marshal(dkey)
 				if err != nil {
@@ -488,7 +520,7 @@ func (r *ResourceStorage) indexKeys(id *guestapi.ResourceId, msg proto.Message, 
 	return nil
 }
 
-func (r *ResourceStorage) Delete(id *guestapi.ResourceId) (*guestapi.Resource, error) {
+func (r *ResourceStorage) Delete(ctx context.Context, id *guestapi.ResourceId) (*guestapi.Resource, error) {
 	var res guestapi.Resource
 
 	err := r.db.Update(func(tx *bbolt.Tx) error {
@@ -522,10 +554,14 @@ func (r *ResourceStorage) Delete(id *guestapi.ResourceId) (*guestapi.Resource, e
 		return nil, err
 	}
 
+	go r.provChange.Emit(ctx, id.Short(), ProvisionChange{
+		Id: id,
+	})
+
 	return &res, nil
 }
 
-func (r *ResourceStorage) SetError(id *guestapi.ResourceId, ierr error) error {
+func (r *ResourceStorage) SetError(ctx context.Context, id *guestapi.ResourceId, ierr error) error {
 	var res guestapi.Resource
 
 	err := r.db.Update(func(tx *bbolt.Tx) error {
@@ -556,10 +592,45 @@ func (r *ResourceStorage) SetError(id *guestapi.ResourceId, ierr error) error {
 		return err
 	}
 
+	go r.provChange.Emit(ctx, id.Short(), ProvisionChange{
+		Id:     id,
+		Status: res.ProvisionStatus,
+	})
+
 	return nil
 }
 
-func (r *ResourceStorage) UpdateProvision(id *guestapi.ResourceId, prov *guestapi.ProvisionStatus) error {
+func (r *ResourceStorage) WatchProvision(id *guestapi.ResourceId) (*guestapi.ProvisionStatus, chan struct{}, error) {
+	var res guestapi.Resource
+
+	ch := make(chan struct{})
+
+	err := r.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(resBucket)
+		key := r.idToBytes(id)
+
+		data := bucket.Get(key)
+		if data == nil {
+			return errors.Wrapf(ErrNotFound, "unable to find id: %s", id.String())
+		}
+
+		err := proto.Unmarshal(data, &res)
+		if err != nil {
+			return err
+		}
+
+		r.watchers[id.Short()] = append(r.watchers[id.Short()], ch)
+
+		return nil
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return res.ProvisionStatus, ch, nil
+}
+
+func (r *ResourceStorage) UpdateProvision(ctx context.Context, id *guestapi.ResourceId, prov *guestapi.ProvisionStatus) error {
 	var res guestapi.Resource
 
 	err := r.db.Update(func(tx *bbolt.Tx) error {
@@ -597,11 +668,28 @@ func (r *ResourceStorage) UpdateProvision(id *guestapi.ResourceId, prov *guestap
 			return err
 		}
 
-		return bucket.Put(key, data)
+		err = bucket.Put(key, data)
+		if err != nil {
+			return err
+		}
+
+		waiters := r.watchers[id.Short()]
+		delete(r.watchers, id.Short())
+
+		for _, ch := range waiters {
+			close(ch)
+		}
+
+		return nil
 	})
 	if err != nil {
 		return err
 	}
+
+	go r.provChange.Emit(ctx, id.Short(), ProvisionChange{
+		Id:     id,
+		Status: prov,
+	})
 
 	return nil
 }
