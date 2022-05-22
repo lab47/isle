@@ -1,9 +1,11 @@
 package guest
 
 import (
+	"context"
 	"os"
 	"testing"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/guestapi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,9 +28,9 @@ func TestResourceStorage(t *testing.T) {
 		defer db.Close()
 
 		var r ResourceStorage
-		r.db = db
+		r.log = hclog.L()
 
-		err = r.Init()
+		err = r.Init(db)
 		require.NoError(t, err)
 
 		schema, err := r.SetSchema("container", "container", &guestapi.Container{}, "stable_name")
@@ -40,7 +42,9 @@ func TestResourceStorage(t *testing.T) {
 			StableName: "foo",
 		}
 
-		_, err = r.Set(id, cont, nil)
+		ctx := context.Background()
+
+		_, err = r.Set(ctx, id, cont, nil)
 		require.NoError(t, err)
 
 		cont2 := &guestapi.Container{
@@ -49,14 +53,14 @@ func TestResourceStorage(t *testing.T) {
 
 		id2 := schema.NewId()
 
-		_, err = r.Set(id2, cont2, nil)
+		_, err = r.Set(ctx, id2, cont2, nil)
 		require.NoError(t, err)
 
 		cont3 := &guestapi.Container{
 			StableName: "zux",
 		}
 
-		_, err = r.Set(schema.NewId(), cont3, nil)
+		_, err = r.Set(ctx, schema.NewId(), cont3, nil)
 		require.NoError(t, err)
 
 		cont4 := &guestapi.Container{
@@ -64,7 +68,7 @@ func TestResourceStorage(t *testing.T) {
 		}
 
 		id4 := schema.NewId()
-		_, err = r.Set(id4, cont4, nil)
+		_, err = r.Set(ctx, id4, cont4, nil)
 		require.NoError(t, err)
 
 		key, err := schema.Key("stable_name", "foo")
@@ -91,7 +95,7 @@ func TestResourceStorage(t *testing.T) {
 		// Change one and see the indexes change
 
 		cont4.StableName = "bar2"
-		_, err = r.Set(id4, cont4, nil)
+		_, err = r.Set(ctx, id4, cont4, nil)
 		require.NoError(t, err)
 
 		res3, err := r.FetchByIndex(key2)
@@ -102,7 +106,7 @@ func TestResourceStorage(t *testing.T) {
 		assert.True(t, proto.Equal(id2, res3[0].Id), "%s <> %s", id2, res2[0].Id.String())
 
 		cont.StableName = "abc"
-		_, err = r.Set(id, cont, nil)
+		_, err = r.Set(ctx, id, cont, nil)
 		require.NoError(t, err)
 
 		res4, err := r.FetchByIndex(key)

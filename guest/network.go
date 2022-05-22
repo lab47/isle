@@ -62,7 +62,7 @@ func (m *IPNetworkManager) Create(ctx *ResourceContext, network *guestapi.IPNetw
 		Status: guestapi.ProvisionStatus_RUNNING,
 	}
 
-	return ctx.Set(id, network, prov)
+	return ctx.Set(ctx, id, network, prov)
 }
 
 func (m *IPNetworkManager) Update(ctx *ResourceContext, res *guestapi.Resource) (*guestapi.Resource, error) {
@@ -74,7 +74,7 @@ func (m *IPNetworkManager) Read(ctx *ResourceContext, id *guestapi.ResourceId) (
 }
 
 func (m *IPNetworkManager) Delete(ctx *ResourceContext, res *guestapi.Resource, cont *guestapi.IPNetwork) error {
-	_, err := ctx.Delete(res.Id)
+	_, err := ctx.Delete(ctx, res.Id)
 	return err
 }
 
@@ -175,7 +175,7 @@ func (m *IPNetworkManager) Allocate(ctx *ResourceContext, id *guestapi.ResourceI
 		return nil, err
 	}
 
-	_, err = ctx.Set(id, &network, res.ProvisionStatus)
+	_, err = ctx.Set(ctx, id, &network, res.ProvisionStatus)
 	if err != nil {
 		return nil, err
 	}
@@ -207,7 +207,7 @@ func (m *IPNetworkManager) Deallocate(ctx *ResourceContext, id *guestapi.Resourc
 
 	delete(network.Data.Allocated, address.String())
 
-	_, err = ctx.Set(id, &network, res.ProvisionStatus)
+	_, err = ctx.Set(ctx, id, &network, res.ProvisionStatus)
 	if err != nil {
 		return err
 	}

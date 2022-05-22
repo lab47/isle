@@ -160,7 +160,7 @@ func (pm *portMonitor) readPorts(ctx *ResourceContext, ports map[int64]struct{})
 
 		pm.network.Ports = portList
 
-		ctx.UpdateProvision(pm.id, &guestapi.ProvisionStatus{
+		ctx.UpdateProvision(ctx, pm.id, &guestapi.ProvisionStatus{
 			NetworkInfo: pm.network,
 		})
 	}

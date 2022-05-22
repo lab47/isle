@@ -91,7 +91,7 @@ func (g *Guest) CheckProvision(ctx context.Context, req *guestapi.CheckProvision
 func (g *Guest) Delete(ctx context.Context, req *guestapi.DeleteResourceReq) (*guestapi.DeleteResourceResp, error) {
 	rctx := g.resourceContext(ctx)
 
-	res, err := rctx.Delete(req.Id)
+	res, err := rctx.Delete(ctx, req.Id)
 	if err != nil {
 		return nil, err
 	}

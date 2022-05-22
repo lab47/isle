@@ -1,0 +1,63 @@
+syntax = "proto3";
+
+package dev.lab47.isle.guestapi;
+
+option go_package = "lab47.dev/isle/guestapi";
+
+message ShellSession {
+  string name = 1;
+  string image = 2;
+}
+
+message SessionStart {
+  repeated string args = 1;
+  repeated EnvVar env = 2;
+
+  string image = 3;
+  string name = 4;
+
+  PTYRequest pty = 5;
+
+  message EnvVar {
+    string key = 1;
+    string value = 2;
+  }
+
+  message PTYRequest {
+    string term = 1;
+    Packet.WindowSize window_size = 2;
+  }
+}
+
+message SessionContinue {
+  int32 pid = 1;
+  string error = 2;
+}
+
+message Packet {
+  bytes data = 1;
+  Channel channel = 2;
+
+  WindowSize window_change = 3;
+  Signal signal = 4;
+  Exit exit = 5;
+
+  enum Channel {
+    STDIN = 0;
+    STDOUT = 1;
+    STDERR = 2;
+  }
+
+  message WindowSize {
+    int32 width = 1;
+    int32 height = 2;
+  }
+
+  message Signal {
+    int32 signal = 1;
+  }
+
+  message Exit {
+    int32 code = 1;
+  }
+}
