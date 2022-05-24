@@ -1203,6 +1203,38 @@ type ExecSession struct {
 	Done chan runc.Exit
 }
 
+func (m *ContainerManager) processStart(ctx context.Context, pidPath string, ch chan runc.Exit) (int, chan runc.Exit, error) {
+	data, err := ioutil.ReadFile(pidPath)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	processPid, err := strconv.Atoi(string(data))
+	if err != nil {
+		return 0, nil, err
+	}
+
+	m.L.Info("command running", "pid", processPid)
+
+	done := make(chan runc.Exit, 1)
+
+	go func() {
+		defer close(done)
+		defer m.reaper.Unsubscribe(ch)
+
+		select {
+		case <-ctx.Done():
+			return
+		case exit := <-ch:
+			if exit.Pid == processPid {
+				done <- exit
+			}
+		}
+	}()
+
+	return processPid, done, nil
+}
+
 func (m *ContainerManager) ExecToStream(ctx context.Context, res *guestapi.Resource, proc specs.Process) (*ExecSession, error) {
 	if res.ProvisionStatus.ContainerInfo == nil ||
 		res.ProvisionStatus.ContainerInfo.Id == "" {
@@ -1233,6 +1265,8 @@ func (m *ContainerManager) ExecToStream(ctx context.Context, res *guestapi.Resou
 
 	m.L.Trace("executing proc via runc", "spec", spew.Sdump(proc))
 
+	ch := m.reaper.Subscribe()
+
 	err = r.Exec(ctx, id, proc, &runc.ExecOpts{
 		IO:      pio,
 		Detach:  true,
@@ -1240,45 +1274,25 @@ func (m *ContainerManager) ExecToStream(ctx context.Context, res *guestapi.Resou
 		PidFile: pidPath,
 	})
 	if err != nil {
+		m.reaper.Unsubscribe(ch)
 		return nil, err
 	}
 
 	select {
 	case <-ctx.Done():
+		m.reaper.Unsubscribe(ch)
 		return nil, ctx.Err()
 	case <-started:
 		// ok
 	}
 
-	data, err := ioutil.ReadFile(pidPath)
+	processPid, done, err := m.processStart(ctx, pidPath, ch)
 	if err != nil {
-		return nil, err
-	}
-
-	processPid, err := strconv.Atoi(string(data))
-	if err != nil {
+		m.reaper.Unsubscribe(ch)
 		return nil, err
 	}
 
 	m.L.Info("command running", "pid", processPid)
-
-	ch := m.reaper.Subscribe()
-	defer m.reaper.Unsubscribe(ch)
-
-	done := make(chan runc.Exit, 1)
-
-	go func() {
-		defer close(done)
-
-		select {
-		case <-ctx.Done():
-			return
-		case exit := <-ch:
-			if exit.Pid == processPid {
-				done <- exit
-			}
-		}
-	}()
 
 	ts := &ExecSession{
 		Stdin:  pio.Stdin(),
@@ -1331,6 +1345,8 @@ func (m *ContainerManager) ExecInTerminal(ctx context.Context, res *guestapi.Res
 
 	proc.Terminal = true
 
+	ch := m.reaper.Subscribe()
+
 	err = r.Exec(ctx, id, proc, &runc.ExecOpts{
 		IO:            pio,
 		ConsoleSocket: consock,
@@ -1345,6 +1361,7 @@ func (m *ContainerManager) ExecInTerminal(ctx context.Context, res *guestapi.Res
 
 	select {
 	case <-ctx.Done():
+		m.reaper.Unsubscribe(ch)
 		return nil, ctx.Err()
 	case <-started:
 		// ok
@@ -1352,40 +1369,15 @@ func (m *ContainerManager) ExecInTerminal(ctx context.Context, res *guestapi.Res
 
 	con, err := consock.ReceiveMaster()
 	if err != nil {
+		m.reaper.Unsubscribe(ch)
 		return nil, err
 	}
 
-	m.L.Info("reading pid file")
-
-	data, err := ioutil.ReadFile(pidPath)
+	processPid, done, err := m.processStart(ctx, pidPath, ch)
 	if err != nil {
+		m.reaper.Unsubscribe(ch)
 		return nil, err
 	}
-
-	processPid, err := strconv.Atoi(string(data))
-	if err != nil {
-		return nil, err
-	}
-
-	m.L.Info("command running", "pid", processPid)
-
-	ch := m.reaper.Subscribe()
-	defer m.reaper.Unsubscribe(ch)
-
-	done := make(chan runc.Exit, 1)
-
-	go func() {
-		defer close(done)
-
-		select {
-		case <-ctx.Done():
-			return
-		case exit := <-ch:
-			if exit.Pid == processPid {
-				done <- exit
-			}
-		}
-	}()
 
 	ts := &TerminalSession{
 		Console: con,
