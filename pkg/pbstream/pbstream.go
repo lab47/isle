@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"io"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/go-hclog"
 	"google.golang.org/protobuf/proto"
 )
@@ -45,15 +44,10 @@ func (s *Stream) Recv(msg proto.Message) error {
 		return err
 	}
 
-	s.log.Trace("recieve packet len", "sz", sz)
-
 	// Handle likely short, already buffered messages directly.
-	s.log.Trace("buffered data", "data", s.br.Buffered())
-
 	if sz <= uint64(s.br.Buffered()) {
 		data, err := s.br.Peek(int(sz))
 		if err == nil {
-			s.log.Trace("unmarshal peek'd data", "data", spew.Sdump(data))
 			err = s.uo.Unmarshal(data, msg)
 			s.br.Discard(int(sz))
 			return err
@@ -84,8 +78,6 @@ func (s *Stream) Send(msg proto.Message) error {
 	sz := binary.PutUvarint(s.szBuf, uint64(len(data)))
 
 	s.log.Trace("sending packet size", "sz", len(data))
-
-	spew.Dump(s.szBuf[:sz], data)
 
 	s.bw.Write(s.szBuf[:sz])
 	s.bw.Write(data)
