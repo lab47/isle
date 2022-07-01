@@ -36,20 +36,22 @@ func (s *showWrite) Write(b []byte) (int, error) {
 }
 
 type showNet struct {
+	name string
 	net.Conn
 }
 
-func ShowNet(c net.Conn) net.Conn {
-	return &showNet{c}
+func ShowNet(name string, c net.Conn) net.Conn {
+	return &showNet{name: name, Conn: c}
 }
 
 func (s *showNet) Read(b []byte) (int, error) {
 	n, err := s.Conn.Read(b)
 
-	fmt.Printf("data read (%d):\r\n%s\r\n", n,
+	fmt.Printf("%s| data read (%d):\r\n%s\r\n",
+		s.name, n,
 		strings.Replace(hex.Dump(b[:n]), "\n", "\r\n", -1))
 
-	fmt.Printf("error: %s\n", err)
+	fmt.Printf("%s| error: %s\n", s.name, err)
 	if err != nil {
 		debug.PrintStack()
 	}
@@ -60,10 +62,11 @@ func (s *showNet) Read(b []byte) (int, error) {
 func (s *showNet) Write(b []byte) (int, error) {
 	n, err := s.Conn.Write(b)
 
-	fmt.Printf("data write (%d):\r\n%s\r\n", n,
+	fmt.Printf("%s| data write (%d):\r\n%s\r\n",
+		s.name, n,
 		strings.Replace(hex.Dump(b), "\n", "\r\n", -1))
 
-	fmt.Printf("error: %s\n", err)
+	fmt.Printf("%s| error: %s\n", s.name, err)
 	if err != nil {
 		debug.PrintStack()
 	}

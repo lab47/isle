@@ -6,11 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/pkg/bytesize"
-	"github.com/lab47/isle/pkg/vz"
 )
 
 type Config struct {
@@ -41,7 +41,15 @@ func CheckConfig(log hclog.Logger, configPath string) error {
 		enc := json.NewEncoder(f)
 		enc.SetIndent("", "  ")
 
-		mac := vz.NewRandomLocallyAdministeredMACAddress()
+		mac := make(net.HardwareAddr, 6)
+
+		_, err = io.ReadFull(rand.Reader, mac)
+		if err != nil {
+			return err
+		}
+
+		// Make sure that the local administered bits are set
+		mac[0] = mac[0] & 0b11111110
 
 		enc.Encode(Config{
 			Cores:      0,

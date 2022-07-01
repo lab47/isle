@@ -5,18 +5,38 @@ package dev.lab47.isle.guestapi;
 option go_package = "lab47.dev/isle/guestapi";
 
 import "resources.proto";
+import "labels.proto";
+
+message User {
+  string username = 1;
+  int32 uid = 2;
+  int32 gid = 3;
+}
+
+message Bind {
+  string host_path = 1;
+  string container_path = 2;
+  repeated string options = 3;
+}
 
 message Container {
   string image = 1;
-  repeated string command = 2;
-  map<string, string> environment = 3;
-  bool expose_ports = 4;
+  repeated string setup_command = 2;
+  map<string, string> setup_environment = 3;
+  Labels port_forward = 4;
 
   // Containers with stable names preserve their root filesystems
   // across restarts. Stable names are unique.
   string stable_name = 5;
 
   repeated ResourceId networks = 6;
+
+  User user = 7;
+
+  repeated Bind binds = 8;
+
+  string hostname = 9;
+  string stable_id = 10;
 }
 
 message Route {

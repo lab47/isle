@@ -5,7 +5,7 @@ name="Isle Guest Management"
 description="Connects to host"
 
 command="/usr/sbin/isle-guest"
-command_args="${ISLE_OPTS}"
+command_args="--data-dir=/data/containers --host-binds /share/home=/home/%user/mac"
 SVC_LOGFILE="${SVC_LOGFILE:-/var/log/${RC_SVCNAME}.log}"
 SVC_ERRFILE="${SVC_ERRFILE:-${SVC_LOGFILE}}"
 SVC_OUTFILE="${SVC_OUTFILE:-${SVC_LOGFILE}}"

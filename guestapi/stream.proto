@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package dev.lab47.isle.guestapi;
+
+option go_package = "lab47.dev/isle/guestapi";
+
+import "shell.proto";
+import "labels.proto";
+
+message StreamHeader {
+  oneof operation {
+    Register register = 1;
+    SessionStart session = 2;
+    Connect connect = 3;
+  }
+
+  message Register {
+    Labels selector = 1;
+  }
+
+  message Connect {
+    Labels selector = 1;
+  }
+}
+
+message StreamAck {
+  oneof response {
+    bool ok = 1;
+    string error = 2;
+  }
+}

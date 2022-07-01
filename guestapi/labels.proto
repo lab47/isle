@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package dev.lab47.isle.guestapi;
+
+option go_package = "lab47.dev/isle/guestapi";
+
+message Labels {
+  repeated Pair pairs = 1;
+
+  message Pair {
+    string key = 1;
+    string value = 2;
+  }
+}

@@ -507,3 +507,211 @@ var HostAPI_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "api.proto",
 }
+
+// VMAPIClient is the client API for VMAPI service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type VMAPIClient interface {
+	SyncTime(ctx context.Context, in *SyncTimeReq, opts ...grpc.CallOption) (*SyncTimeResp, error)
+	VMInfo(ctx context.Context, in *VMInfoReq, opts ...grpc.CallOption) (*VMInfoResp, error)
+}
+
+type vMAPIClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewVMAPIClient(cc grpc.ClientConnInterface) VMAPIClient {
+	return &vMAPIClient{cc}
+}
+
+func (c *vMAPIClient) SyncTime(ctx context.Context, in *SyncTimeReq, opts ...grpc.CallOption) (*SyncTimeResp, error) {
+	out := new(SyncTimeResp)
+	err := c.cc.Invoke(ctx, "/dev.lab47.isle.guestapi.VMAPI/SyncTime", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *vMAPIClient) VMInfo(ctx context.Context, in *VMInfoReq, opts ...grpc.CallOption) (*VMInfoResp, error) {
+	out := new(VMInfoResp)
+	err := c.cc.Invoke(ctx, "/dev.lab47.isle.guestapi.VMAPI/VMInfo", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// VMAPIServer is the server API for VMAPI service.
+// All implementations must embed UnimplementedVMAPIServer
+// for forward compatibility
+type VMAPIServer interface {
+	SyncTime(context.Context, *SyncTimeReq) (*SyncTimeResp, error)
+	VMInfo(context.Context, *VMInfoReq) (*VMInfoResp, error)
+	mustEmbedUnimplementedVMAPIServer()
+}
+
+// UnimplementedVMAPIServer must be embedded to have forward compatible implementations.
+type UnimplementedVMAPIServer struct {
+}
+
+func (UnimplementedVMAPIServer) SyncTime(context.Context, *SyncTimeReq) (*SyncTimeResp, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method SyncTime not implemented")
+}
+func (UnimplementedVMAPIServer) VMInfo(context.Context, *VMInfoReq) (*VMInfoResp, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VMInfo not implemented")
+}
+func (UnimplementedVMAPIServer) mustEmbedUnimplementedVMAPIServer() {}
+
+// UnsafeVMAPIServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to VMAPIServer will
+// result in compilation errors.
+type UnsafeVMAPIServer interface {
+	mustEmbedUnimplementedVMAPIServer()
+}
+
+func RegisterVMAPIServer(s grpc.ServiceRegistrar, srv VMAPIServer) {
+	s.RegisterService(&VMAPI_ServiceDesc, srv)
+}
+
+func _VMAPI_SyncTime_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SyncTimeReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VMAPIServer).SyncTime(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/dev.lab47.isle.guestapi.VMAPI/SyncTime",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VMAPIServer).SyncTime(ctx, req.(*SyncTimeReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _VMAPI_VMInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(VMInfoReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(VMAPIServer).VMInfo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/dev.lab47.isle.guestapi.VMAPI/VMInfo",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(VMAPIServer).VMInfo(ctx, req.(*VMInfoReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// VMAPI_ServiceDesc is the grpc.ServiceDesc for VMAPI service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var VMAPI_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "dev.lab47.isle.guestapi.VMAPI",
+	HandlerType: (*VMAPIServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "SyncTime",
+			Handler:    _VMAPI_SyncTime_Handler,
+		},
+		{
+			MethodName: "VMInfo",
+			Handler:    _VMAPI_VMInfo_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "api.proto",
+}
+
+// StartupAPIClient is the client API for StartupAPI service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+type StartupAPIClient interface {
+	VMRunning(ctx context.Context, in *RunningReq, opts ...grpc.CallOption) (*RunningResp, error)
+}
+
+type startupAPIClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewStartupAPIClient(cc grpc.ClientConnInterface) StartupAPIClient {
+	return &startupAPIClient{cc}
+}
+
+func (c *startupAPIClient) VMRunning(ctx context.Context, in *RunningReq, opts ...grpc.CallOption) (*RunningResp, error) {
+	out := new(RunningResp)
+	err := c.cc.Invoke(ctx, "/dev.lab47.isle.guestapi.StartupAPI/VMRunning", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// StartupAPIServer is the server API for StartupAPI service.
+// All implementations must embed UnimplementedStartupAPIServer
+// for forward compatibility
+type StartupAPIServer interface {
+	VMRunning(context.Context, *RunningReq) (*RunningResp, error)
+	mustEmbedUnimplementedStartupAPIServer()
+}
+
+// UnimplementedStartupAPIServer must be embedded to have forward compatible implementations.
+type UnimplementedStartupAPIServer struct {
+}
+
+func (UnimplementedStartupAPIServer) VMRunning(context.Context, *RunningReq) (*RunningResp, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method VMRunning not implemented")
+}
+func (UnimplementedStartupAPIServer) mustEmbedUnimplementedStartupAPIServer() {}
+
+// UnsafeStartupAPIServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to StartupAPIServer will
+// result in compilation errors.
+type UnsafeStartupAPIServer interface {
+	mustEmbedUnimplementedStartupAPIServer()
+}
+
+func RegisterStartupAPIServer(s grpc.ServiceRegistrar, srv StartupAPIServer) {
+	s.RegisterService(&StartupAPI_ServiceDesc, srv)
+}
+
+func _StartupAPI_VMRunning_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RunningReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StartupAPIServer).VMRunning(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/dev.lab47.isle.guestapi.StartupAPI/VMRunning",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StartupAPIServer).VMRunning(ctx, req.(*RunningReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// StartupAPI_ServiceDesc is the grpc.ServiceDesc for StartupAPI service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var StartupAPI_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "dev.lab47.isle.guestapi.StartupAPI",
+	HandlerType: (*StartupAPIServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "VMRunning",
+			Handler:    _StartupAPI_VMRunning_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "api.proto",
+}

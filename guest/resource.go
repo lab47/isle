@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"github.com/lab47/isle/guestapi"
 	"github.com/oklog/ulid"
 	"github.com/pkg/errors"
+	"github.com/samber/do"
 	"go.etcd.io/bbolt"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
@@ -26,6 +28,27 @@ type ProvisionChange struct {
 type ResourceContext struct {
 	context.Context
 	*ResourceStorage
+}
+
+func NewResourceContext(inj *do.Injector) (*ResourceContext, error) {
+	ctx, err := do.InvokeNamed[context.Context](inj, "top")
+	if err != nil {
+		return nil, err
+	}
+
+	storage, err := do.Invoke[*ResourceStorage](inj)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ResourceContext{Context: ctx, ResourceStorage: storage}, nil
+}
+
+func (rs *ResourceContext) Under(ctx context.Context) *ResourceContext {
+	return &ResourceContext{
+		Context:         ctx,
+		ResourceStorage: rs.ResourceStorage,
+	}
 }
 
 type ResourceManager interface {
@@ -127,6 +150,27 @@ type ResourceIndices struct {
 	Descs   []protoreflect.FieldDescriptor
 }
 
+func NewResourceStorage(inj *do.Injector) (*ResourceStorage, error) {
+	log, err := do.Invoke[hclog.Logger](inj)
+	if err != nil {
+		return nil, err
+	}
+
+	db, err := do.Invoke[*DBService](inj)
+	if err != nil {
+		return nil, err
+	}
+
+	var r ResourceStorage
+
+	err = r.Init(log, db.DB)
+	if err != nil {
+		return nil, err
+	}
+
+	return &r, nil
+}
+
 type ResourceStorage struct {
 	log hclog.Logger
 	db  *bbolt.DB
@@ -216,7 +260,8 @@ func (r *ResourceStorage) SetSchema(category, typ string, msg proto.Message, fie
 	return sch, nil
 }
 
-func (r *ResourceStorage) Init(db *bbolt.DB) error {
+func (r *ResourceStorage) Init(log hclog.Logger, db *bbolt.DB) error {
+	r.log = log
 	r.db = db
 	r.schema = make(map[string]*ResourceIndices)
 	r.watchers = make(map[string][]chan struct{})
@@ -236,6 +281,19 @@ func (r *ResourceStorage) Init(db *bbolt.DB) error {
 
 func (r *ResourceStorage) idToBytes(id *guestapi.ResourceId) []byte {
 	return []byte(fmt.Sprintf("%s/%s/%s", id.Category, id.Type, id.UniqueId))
+}
+
+func (r *ResourceStorage) idFromBytes(key []byte) (*guestapi.ResourceId, error) {
+	parts := bytes.SplitN(key, []byte("/"), 3)
+	if len(parts) != 3 {
+		return nil, fmt.Errorf("key was not a / delimit'd key")
+	}
+
+	return &guestapi.ResourceId{
+		Category: string(parts[0]),
+		Type:     string(parts[1]),
+		UniqueId: parts[2],
+	}, nil
 }
 
 var (
@@ -600,6 +658,53 @@ func (r *ResourceStorage) SetError(ctx context.Context, id *guestapi.ResourceId,
 	return nil
 }
 
+func (r *ResourceStorage) List(category, typ string) ([]*guestapi.Resource, error) {
+	id := &guestapi.ResourceId{
+		Category: category,
+		Type:     typ,
+	}
+
+	var result []*guestapi.Resource
+
+	err := r.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(resBucket)
+		idkey := r.idToBytes(id)
+
+		cur := bucket.Cursor()
+
+		key, val := cur.Seek(idkey)
+
+		for len(key) != 0 {
+			pkey, err := r.idFromBytes(key)
+			if err != nil {
+				return errors.Wrapf(err, "attempting to unmarshal resource key")
+			}
+
+			if pkey.Category != category || pkey.Type != typ {
+				break
+			}
+
+			var res guestapi.Resource
+
+			err = proto.Unmarshal(val, &res)
+			if err != nil {
+				return errors.Wrapf(err, "attempting to unmarshal resource")
+			}
+
+			result = append(result, &res)
+
+			key, val = cur.Next()
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
 func (r *ResourceStorage) WatchProvision(id *guestapi.ResourceId) (*guestapi.ProvisionStatus, chan struct{}, error) {
 	var res guestapi.Resource
 
@@ -663,6 +768,12 @@ func (r *ResourceStorage) UpdateProvision(ctx context.Context, id *guestapi.Reso
 			res.ProvisionStatus.NetworkInfo = prov.NetworkInfo
 		}
 
+		if prov.StatusDetails != "" {
+			res.ProvisionStatus.StatusDetails = prov.StatusDetails
+		}
+
+		prov = res.ProvisionStatus
+
 		data, err = proto.Marshal(&res)
 		if err != nil {
 			return err
@@ -685,6 +796,8 @@ func (r *ResourceStorage) UpdateProvision(ctx context.Context, id *guestapi.Reso
 	if err != nil {
 		return err
 	}
+
+	r.log.Debug("emitting prov change", "id", id.Short())
 
 	go r.provChange.Emit(ctx, id.Short(), ProvisionChange{
 		Id:     id,

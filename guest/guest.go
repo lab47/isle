@@ -99,6 +99,10 @@ func newUniqueId() string {
 	return newHexId(5)
 }
 
+func NewUniqueId() string {
+	return newHexId(5)
+}
+
 func newHexId(sz int) string {
 	data := make([]byte, sz)
 	io.ReadFull(rand.Reader, data)

@@ -3,9 +3,35 @@ package guest
 import (
 	"encoding/json"
 	"errors"
+	"path/filepath"
 
+	"github.com/samber/do"
 	"go.etcd.io/bbolt"
 )
+
+type DBService struct {
+	*bbolt.DB
+}
+
+func (d *DBService) Shutdown() error {
+	return d.Close()
+}
+
+func OpenDB(inj *do.Injector) (*DBService, error) {
+	dataDir, err := do.InvokeNamed[string](inj, "data-dir")
+	if err != nil {
+		return nil, err
+	}
+
+	dbPath := filepath.Join(dataDir, "data.db")
+
+	db, err := bbolt.Open(dbPath, 0644, bbolt.DefaultOptions)
+	if err != nil {
+		return nil, err
+	}
+
+	return &DBService{DB: db}, nil
+}
 
 func (g *Guest) openDB() error {
 	db, err := bbolt.Open("/data/data.db", 0644, bbolt.DefaultOptions)
