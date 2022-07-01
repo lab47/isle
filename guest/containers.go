@@ -29,13 +29,14 @@ import (
 	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/pkg/bridge"
 	"github.com/lab47/isle/pkg/clog"
-	"github.com/lab47/isle/pkg/netutil"
+	"github.com/lab47/isle/pkg/pbstream"
 	"github.com/lab47/isle/pkg/progressbar"
 	"github.com/lab47/isle/pkg/reaper"
 	"github.com/lab47/isle/pkg/runc"
 	"github.com/mr-tron/base58"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
+	"github.com/samber/do"
 	"golang.org/x/sys/unix"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -65,6 +66,8 @@ type ContainerManager struct {
 
 	runningMu sync.Mutex
 	running   map[string]func()
+
+	conMan *ConnectionManager
 }
 
 type containerTracker struct {
@@ -119,28 +122,69 @@ type ContainerConfig struct {
 
 	LayerCacheDir string
 
-	HelperPath string
+	HelperPath  string
+	IsleBinPath string
 
 	NetworkManager *IPNetworkManager
 }
 
-func CNIEnv() (*netutil.CNIEnv, error) {
-	ce := &netutil.CNIEnv{
-		NetconfPath: "/etc/cni/net.d",
+func NewContainerManager(inj *do.Injector) (*ContainerManager, error) {
+	log, err := do.Invoke[hclog.Logger](inj)
+	if err != nil {
+		return nil, err
 	}
 
-	for _, path := range []string{"/usr/libexec/cni", "/usr/lib/cni"} {
-		if _, err := os.Stat(path); err == nil {
-			ce.Path = path
-			break
-		}
+	ipm, err := do.Invoke[*IPNetworkManager](inj)
+	if err != nil {
+		return nil, err
 	}
 
-	if ce.Path == "" {
-		return nil, fmt.Errorf("unable to find cni plugins")
+	rctx, err := do.Invoke[*ResourceContext](inj)
+	if err != nil {
+		return nil, err
 	}
 
-	return ce, nil
+	dataDir, err := do.InvokeNamed[string](inj, "data-dir")
+	if err != nil {
+		return nil, err
+	}
+
+	conMan, err := do.Invoke[*ConnectionManager](inj)
+	if err != nil {
+		return nil, err
+	}
+
+	nodeId := NewUniqueId()
+
+	var cm ContainerManager
+	cm.conMan = conMan
+
+	os.MkdirAll("/run/isle", 0755)
+
+	runRoot := filepath.Join(dataDir, "runc")
+	err = os.MkdirAll(runRoot, 0755)
+	if err != nil {
+		return nil, err
+	}
+
+	err = cm.Init(rctx, &ContainerConfig{
+		Logger:   log,
+		BaseDir:  filepath.Join(dataDir, "containers"),
+		HomeDir:  filepath.Join(dataDir, "volumes"),
+		NodeId:   nodeId,
+		RuncRoot: runRoot,
+		RunDir:   "/run/isle",
+
+		BridgeID: 0,
+
+		HelperPath:     "/usr/bin/isle-helper",
+		NetworkManager: ipm,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return &cm, nil
 }
 
 func (m *ContainerManager) Init(ctx *ResourceContext, cfg *ContainerConfig) error {
@@ -190,13 +234,141 @@ func (m *ContainerManager) Init(ctx *ResourceContext, cfg *ContainerConfig) erro
 
 	m.sshAgentPath = filepath.Join(m.cfg.RunDir, "ssh-agent-host.sock")
 
-	return nil
+	m.L.Info("starting DNS")
+	go StartDNS(ctx, m.L)
+
+	m.L.Info("restarting any stopped containers")
+	return m.restartContainers(ctx)
 }
 
 func (m *ContainerManager) Close() error {
 	m.bgCancel()
 	m.track.Wait()
 	return nil
+}
+
+func (m *ContainerManager) Shutdown() error {
+	return m.Close()
+}
+
+func (m *ContainerManager) restartContainers(ctx *ResourceContext) error {
+	sel := ctx.ProvisionChangeSelector()
+
+	resources, err := ctx.List("container", "container")
+	if err != nil {
+		return err
+	}
+
+	for _, res := range resources {
+		raw, err := res.Resource.UnmarshalNew()
+		if err != nil {
+			return err
+		}
+
+		if res.ProvisionStatus.Status == guestapi.ProvisionStatus_RUNNING ||
+			res.ProvisionStatus.Status == guestapi.ProvisionStatus_STOPPED {
+			cont, ok := raw.(*guestapi.Container)
+			if !ok {
+				return errors.Wrapf(ErrInvalidResource, "container type not a container")
+			}
+
+			err = ctx.UpdateProvision(ctx, res.Id, &guestapi.ProvisionStatus{
+				Status: guestapi.ProvisionStatus_ADDING,
+			})
+			if err != nil {
+				return err
+			}
+
+			err = m.restartContainer(ctx, res, cont, sel)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *ContainerManager) waitOnContainer(ctx *ResourceContext, ch chan ProvisionChange) error {
+loop:
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case provCha := <-ch:
+			status := provCha.Status
+
+			switch status.Status {
+			case guestapi.ProvisionStatus_ADDING:
+				// ok, keep waiting
+			case guestapi.ProvisionStatus_DEAD, guestapi.ProvisionStatus_SUSPENDED:
+				return errors.Wrapf(ErrInvalidResource, "container died rather than start")
+			case guestapi.ProvisionStatus_RUNNING:
+				break loop
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *ContainerManager) restartContainer(
+	ctx *ResourceContext,
+	res *guestapi.Resource,
+	cont *guestapi.Container,
+	sel *Signal[ProvisionChange],
+) error {
+	ch := sel.Register(res.Id.Short())
+	defer sel.Unregister(ch)
+
+	imgref, err := name.ParseReference(cont.Image)
+	if err != nil {
+		return err
+	}
+
+	id := res.Id
+
+	m.L.Info("restarting stopped container", "id", id.Short())
+
+	m.track.Add()
+
+	go func() {
+		defer m.track.Done()
+
+		goctx, cancel := context.WithCancel(m.bgCtx)
+
+		m.runningMu.Lock()
+		m.running[id.Short()] = cancel
+		m.runningMu.Unlock()
+
+		defer func() {
+			m.runningMu.Lock()
+			delete(m.running, id.Short())
+			m.runningMu.Unlock()
+		}()
+
+		sub := &ResourceContext{
+			Context:         goctx,
+			ResourceStorage: ctx.ResourceStorage,
+		}
+
+		err := m.startContainer(sub, imgref, id, nil, 0, cont)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				ctx.UpdateProvision(ctx, id, &guestapi.ProvisionStatus{
+					Status: guestapi.ProvisionStatus_STOPPED,
+				})
+			} else {
+				m.L.Error("error creating container", "error", err, "id", id.Short())
+				err = ctx.SetError(ctx, id, err)
+				if err != nil {
+					m.L.Error("error recording error on container", "error", err, "id", id.UniqueId)
+				}
+			}
+		}
+	}()
+
+	return m.waitOnContainer(ctx, ch)
 }
 
 func (m *ContainerManager) Create(ctx *ResourceContext, cont *guestapi.Container) (*guestapi.Resource, error) {
@@ -238,8 +410,6 @@ func (m *ContainerManager) Create(ctx *ResourceContext, cont *guestapi.Container
 			m.runningMu.Lock()
 			delete(m.running, id.Short())
 			m.runningMu.Unlock()
-
-			ctx.Delete(ctx, id)
 		}()
 
 		sub := &ResourceContext{
@@ -251,7 +421,7 @@ func (m *ContainerManager) Create(ctx *ResourceContext, cont *guestapi.Container
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				ctx.UpdateProvision(ctx, id, &guestapi.ProvisionStatus{
-					Status: guestapi.ProvisionStatus_DEAD,
+					Status: guestapi.ProvisionStatus_STOPPED,
 				})
 			} else {
 				m.L.Error("error creating container", "error", err, "id", id.UniqueId)
@@ -275,7 +445,14 @@ func (m *ContainerManager) Update(ctx *ResourceContext, res *guestapi.Resource) 
 }
 
 func (m *ContainerManager) Read(ctx *ResourceContext, id *guestapi.ResourceId) (*guestapi.Resource, error) {
-	return ctx.Fetch(id)
+	res, err := ctx.Fetch(id)
+	if err != nil {
+		return nil, err
+	}
+
+	m.L.Debug("reading container", "id", id.Short(), "status", res.ProvisionStatus.Status.String())
+
+	return res, nil
 }
 
 func (m *ContainerManager) Delete(ctx *ResourceContext, res *guestapi.Resource, cont *guestapi.Container) error {
@@ -530,14 +707,31 @@ func (m *ContainerManager) startContainer(
 	cont *guestapi.Container,
 ) error {
 	id := rid.Short()
-	name := rid.Short()
 
-	bundlePath := filepath.Join(m.cfg.BaseDir, name)
+	hostname := cont.Hostname
+	if hostname == "" {
+		hostname = id
+	}
+
+	stableId := cont.StableId
+	if stableId == "" {
+		stableId = id
+	}
+
+	bundlePath := filepath.Join(m.cfg.BaseDir, stableId)
 	rootFsPath := filepath.Join(bundlePath, "rootfs")
 
 	var cfg *v1.Config
 
+	var runSetup bool
+
 	if _, err := os.Stat(rootFsPath); err != nil {
+		runSetup = true
+
+		ctx.UpdateProvision(ctx, rid, &guestapi.ProvisionStatus{
+			StatusDetails: "Downloading and unpacking OCI image",
+		})
+
 		cfg, err = m.unpackOCI(ctx, img, rootFsPath, status, width)
 		if err != nil {
 			return err
@@ -563,7 +757,11 @@ func (m *ContainerManager) startContainer(
 		}
 	}
 
-	volHome := filepath.Join(m.cfg.HomeDir, m.cfg.User)
+	ctx.UpdateProvision(ctx, rid, &guestapi.ProvisionStatus{
+		StatusDetails: "Configuring container",
+	})
+
+	volHome := filepath.Join(m.cfg.HomeDir, cont.User.Username)
 
 	os.MkdirAll(filepath.Dir(volHome), 0755)
 
@@ -578,6 +776,10 @@ func (m *ContainerManager) startContainer(
 	shareDir := filepath.Join(m.cfg.RunDir, "share")
 
 	os.MkdirAll(shareDir, 0755)
+
+	// Also make sure /run/share exists, since that's what
+	// we bind shareDir to.
+	os.MkdirAll("/run/share", 0755)
 
 	ipam := &bridge.IPAM{}
 
@@ -604,7 +806,7 @@ func (m *ContainerManager) startContainer(
 
 			ni.Addresses = append(ni.Addresses, guestapi.ToIPAddress(ip))
 
-			if gw.To4() == nil {
+			if gw.To4() != nil {
 				hostAddr = gw.String()
 			}
 
@@ -638,7 +840,7 @@ func (m *ContainerManager) startContainer(
 			Args: []string{"/dev/init"},
 			Env: []string{
 				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/isle/bin",
-				"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
+				// "SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
 			},
 			Cwd: "/",
 			Capabilities: &specs.LinuxCapabilities{
@@ -658,7 +860,7 @@ func (m *ContainerManager) startContainer(
 		Root: &specs.Root{
 			Path: "rootfs",
 		},
-		Hostname: name,
+		Hostname: hostname,
 		Mounts: []specs.Mount{
 			{
 				Destination: "/proc",
@@ -745,7 +947,7 @@ func (m *ContainerManager) startContainer(
 			{
 				Destination: "/home",
 				Type:        "bind",
-				Source:      "/vol/user/home",
+				Source:      m.cfg.HomeDir,
 				Options:     []string{"rbind", "rshared", "rw"},
 			},
 			{
@@ -766,12 +968,12 @@ func (m *ContainerManager) startContainer(
 				Source:      "/etc/localtime",
 				Options:     []string{"rbind", "ro"},
 			},
-			{
-				Destination: "/tmp/ssh-agent.sock",
-				Type:        "bind",
-				Source:      m.sshAgentPath,
-				Options:     []string{"rbind", "rw"},
-			},
+			// {
+			// Destination: "/tmp/ssh-agent.sock",
+			// Type:        "bind",
+			// Source:      m.sshAgentPath,
+			// Options:     []string{"rbind", "rw"},
+			// },
 			{
 				Destination: "/dev/init",
 				Type:        "bind",
@@ -787,7 +989,7 @@ func (m *ContainerManager) startContainer(
 			{
 				Destination: "/opt/isle/bin",
 				Type:        "bind",
-				Source:      "/opt/isle/bin",
+				Source:      m.cfg.IsleBinPath,
 				Options:     []string{"rbind", "rshared", "ro"},
 			},
 		},
@@ -800,7 +1002,7 @@ func (m *ContainerManager) startContainer(
 					},
 				},
 			},
-			CgroupsPath: "/isle/" + name,
+			CgroupsPath: "/isle/" + stableId,
 			Namespaces: []specs.LinuxNamespace{
 				{
 					Type: "pid",
@@ -821,6 +1023,14 @@ func (m *ContainerManager) startContainer(
 		},
 	}
 
+	for _, bind := range cont.Binds {
+		s.Mounts = append(s.Mounts, specs.Mount{
+			Source:      bind.HostPath,
+			Destination: bind.ContainerPath,
+			Options:     bind.Options,
+		})
+	}
+
 	err := ioutil.WriteFile(
 		filepath.Join(bundlePath, "resolv.conf"),
 		[]byte(fmt.Sprintf("nameserver %s\n", hostAddr)), 0644)
@@ -834,7 +1044,7 @@ func (m *ContainerManager) startContainer(
 			"127.0.0.1\tlocalhost localhost.localdomain %s\n"+
 				"::1\tlocalhost localhost.localdomain %s\n"+
 				"192.168.64.1\tmac mac.internal host.internal\n",
-			name, name)), 0644)
+			hostname, hostname)), 0644)
 	if err != nil {
 		return err
 	}
@@ -854,7 +1064,8 @@ func (m *ContainerManager) startContainer(
 	f.Close()
 
 	r := runc.Runc{
-		Root: m.cfg.RuncRoot,
+		Root:  m.cfg.RuncRoot,
+		Debug: true,
 	}
 
 	started := make(chan int, 1)
@@ -940,7 +1151,7 @@ func (m *ContainerManager) startContainer(
 	ilog.Info("container started", "pid", pid)
 
 	h := sha256.New()
-	h.Write([]byte(name))
+	h.Write([]byte(stableId))
 
 	idBytes := h.Sum(nil)
 
@@ -970,11 +1181,6 @@ func (m *ContainerManager) startContainer(
 		IPAM:        ipam,
 	}
 
-	err = bridge.Configure(ctx, m.L, bridgeConfig)
-	if err != nil {
-		return errors.Wrapf(err, "configuring container networking")
-	}
-
 	var removedCNI bool
 	defer func() {
 		if removedCNI {
@@ -985,33 +1191,42 @@ func (m *ContainerManager) startContainer(
 		m.L.Error("deleted cni for container", "id", id, "error", err)
 	}()
 
-	setup := []string{
-		// We need be sure that /var/run is mapped to /run because
-		// we mount /run under the host's /run so that it can be
-		// accessed by the host.
-		"rm -rf /var/run; ln -s /run /var/run",
-		"mkdir -p /etc/sudoers.d",
-		"echo '%user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/00-%user",
-		"echo root:root | chpasswd",
-		"id evan || useradd -u 501 -m %user || adduser -u 501 -h /home/%user %user",
-		"echo %user:%user | chpasswd",
-		"stat /home/%user/mac || ln -sf /share/home /home/%user/mac",
-	}
-
-	for i, str := range setup {
-		setup[i] = strings.ReplaceAll(str, "%user", m.cfg.User)
-	}
-
-	var setupSp specs.Process
-	setupSp.Args = []string{"/bin/sh", "-c", strings.Join(setup, "; ")}
-	setupSp.Env = []string{"PATH=/bin:/sbin:/usr/bin:/usr/sbin:/opt/isle/bin"}
-	setupSp.Cwd = "/"
-
-	m.L.Info("running container setup")
-
-	err = r.Exec(ctx, id, setupSp, &runc.ExecOpts{})
+	err = bridge.Configure(ctx, m.L, bridgeConfig)
 	if err != nil {
-		return err
+		return errors.Wrapf(err, "configuring container networking")
+	}
+
+	if runSetup && len(cont.SetupCommand) > 0 {
+		ctx.UpdateProvision(ctx, rid, &guestapi.ProvisionStatus{
+			StatusDetails: "Executing container setup",
+		})
+
+		var setupSp specs.Process
+		setupSp.Args = cont.SetupCommand
+
+		setupPath := []string{"/bin", "/sbin", "/usr/bin", "/usr/sbin", "/opt/isle/bin"}
+
+		var sawPath bool
+
+		for k, v := range cont.SetupEnvironment {
+			setupSp.Env = append(setupSp.Env, k+"="+v)
+			if k == "PATH" {
+				sawPath = true
+			}
+		}
+
+		if !sawPath {
+			setupSp.Env = append(setupSp.Env, "PATH="+strings.Join(setupPath, ":"))
+		}
+
+		setupSp.Cwd = "/"
+
+		m.L.Info("running container setup")
+
+		err = r.Exec(ctx, id, setupSp, &runc.ExecOpts{})
+		if err != nil {
+			return err
+		}
 	}
 
 	var addresses []string
@@ -1026,34 +1241,43 @@ func (m *ContainerManager) startContainer(
 
 	path := fmt.Sprintf("/proc/%d/net/tcp", pid)
 
-	m.L.Info("monitoring for ports", "path", path, "target", addresses[0])
+	if len(ipam.Addresses) > 0 && cont.PortForward != nil {
+		m.L.Info("monitoring for ports", "path", path, "target", addresses[0], "api-target", cont.PortForward.Set().String())
 
-	pm := &portMonitor{
-		id:      rid,
-		log:     m.L,
-		api:     m.hostAPI,
-		sess:    m.currentSession,
-		network: ni,
-		target:  addresses[0],
-		path:    path,
+		client := guestapi.PBSNewHostAPIClient(
+			pbstream.StreamOpenFunc(func() (*pbstream.Stream, error) {
+				rs, _, err := m.conMan.Open(cont.PortForward.Set())
+				return rs, err
+			}))
+
+		pm := &portMonitor{
+			id:      rid,
+			log:     m.L,
+			api:     client,
+			network: ni,
+			target:  ipam.Addresses[0].Address.IP.String(),
+			path:    path,
+			conMan:  m.conMan,
+		}
+
+		go pm.start(ctx)
 	}
 
-	go pm.start(ctx)
+	// var ms shareTracker
 
-	var ms shareTracker
+	// defer m.clearMounts(&ms)
 
-	defer m.clearMounts(&ms)
+	// cur, advertCh := m.adverts.RegisterEvents(id)
 
-	cur, advertCh := m.adverts.RegisterEvents(id)
+	// defer m.adverts.UnregisterEvents(id)
 
-	defer m.adverts.UnregisterEvents(id)
-
-	for _, ad := range cur {
-		m.mountAd(&ms, id, ad)
-	}
+	// for _, ad := range cur {
+	// m.mountAd(&ms, id, ad)
+	// }
 
 	err = ctx.UpdateProvision(ctx, rid, &guestapi.ProvisionStatus{
-		Status: guestapi.ProvisionStatus_RUNNING,
+		Status:        guestapi.ProvisionStatus_RUNNING,
+		StatusDetails: "container running",
 		ContainerInfo: &guestapi.ContainerInfo{
 			Id:        id,
 			Image:     img.Name(),
@@ -1076,12 +1300,12 @@ loop:
 		select {
 		case <-ctx.Done():
 			break loop
-		case ev := <-advertCh:
-			if ev.Add {
-				m.mountAd(&ms, id, ev.Advertisement)
-			} else {
-				m.removeAd(&ms, id, ev.Advertisement)
-			}
+			// case ev := <-advertCh:
+			// if ev.Add {
+			// m.mountAd(&ms, id, ev.Advertisement)
+			// } else {
+			// m.removeAd(&ms, id, ev.Advertisement)
+			// }
 		}
 	}
 
@@ -1096,7 +1320,15 @@ loop:
 	}
 	removedCNI = true
 
-	m.L.Warn("removing container")
+	m.L.Warn("setting container as stopped")
+
+	err = ctx.UpdateProvision(ctx, rid, &guestapi.ProvisionStatus{
+		Status: guestapi.ProvisionStatus_STOPPED,
+	})
+
+	if err != nil {
+		m.L.Error("error updating provisioning", "error", err, "id", rid.String())
+	}
 
 	err = r.Delete(finCtx, id, &runc.DeleteOpts{
 		Force: true,

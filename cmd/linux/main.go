@@ -59,6 +59,10 @@ func main() {
 		}
 
 		r, w, err := os.Pipe()
+		if err != nil {
+			panic(err)
+		}
+
 		cmd := exec.Command(execPath, "--state-dir="+*fStateDir, "--start")
 		cmd.Env = os.Environ()
 		cmd.Env = append(cmd.Env, "_VM_BACKGROUND=3")

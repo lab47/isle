@@ -5,11 +5,16 @@ import (
 	"net"
 	"sync"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/guestapi"
+	"github.com/samber/do"
 )
 
 type IPNetworkManager struct {
+	log             hclog.Logger
 	containerSchema *Schema
+
+	clusterId string
 
 	mu sync.Mutex
 }
@@ -23,6 +28,82 @@ func (m *IPNetworkManager) Init(ctx *ResourceContext) error {
 	m.containerSchema = s
 
 	return nil
+}
+
+func (m *IPNetworkManager) Bootstrap(ctx *ResourceContext) (*guestapi.ResourceId, error) {
+	err := m.Init(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(m.clusterId) != 10 {
+		m.clusterId = newHexId(5)
+		m.log.Debug("assigned random new cluster-id", "cluster-id", m.clusterId)
+	}
+
+	m.log.Info("bootstrapping network manager", "cluster-id", m.clusterId)
+
+	key, err := m.containerSchema.Key("name", "default")
+	if err != nil {
+		return nil, err
+	}
+
+	resources, err := ctx.FetchByIndex(key)
+	if err == nil {
+		if len(resources) == 1 {
+			return resources[0].Id, nil
+		}
+	}
+
+	v6net, err := IPv6Base(m.clusterId, newHexId(2))
+	if err != nil {
+		return nil, err
+	}
+
+	// create the default network if it doesn't exist.
+
+	ipn := &guestapi.IPNetwork{
+		Name:        "default",
+		Ipv4Block:   guestapi.MustParseCIDR("10.47.0.0/24"),
+		Ipv4Gateway: guestapi.MustParseCIDR("10.47.0.1/32"),
+		Ipv6Block:   guestapi.ToIPAddress(v6net),
+		Ipv6Gateway: guestapi.FromNetIP(FirstAddress(v6net)),
+	}
+
+	res, err := m.Create(ctx, ipn)
+	if err != nil {
+		return nil, err
+	}
+
+	return res.Id, nil
+}
+
+func BootstrapIPM(i *do.Injector) (*IPNetworkManager, error) {
+	ctx, err := do.Invoke[*ResourceContext](i)
+	if err != nil {
+		return nil, err
+	}
+
+	log, err := do.Invoke[hclog.Logger](i)
+	if err != nil {
+		return nil, err
+	}
+
+	clusterId, _ := do.InvokeNamed[string](i, "cluster-id")
+
+	ipm := &IPNetworkManager{
+		log:       log,
+		clusterId: clusterId,
+	}
+
+	resid, err := ipm.Bootstrap(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	do.ProvideNamedValue(i, "default-network", resid)
+
+	return ipm, nil
 }
 
 func (m *IPNetworkManager) Create(ctx *ResourceContext, network *guestapi.IPNetwork) (*guestapi.Resource, error) {

@@ -20,6 +20,7 @@ import (
 	"github.com/fxamacker/cbor/v2"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
+	"github.com/lab47/isle/cli/config"
 	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/pkg/bytesize"
 	"github.com/lab47/isle/pkg/timesync"
@@ -39,7 +40,7 @@ type VM struct {
 
 	L        hclog.Logger
 	StateDir string
-	Config   Config
+	Config   config.Config
 
 	mu        sync.Mutex
 	listeners map[int]portListener

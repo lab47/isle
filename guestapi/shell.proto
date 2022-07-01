@@ -4,9 +4,16 @@ package dev.lab47.isle.guestapi;
 
 option go_package = "lab47.dev/isle/guestapi";
 
+import "containers.proto";
+import "labels.proto";
+
 message ShellSession {
   string name = 1;
   string image = 2;
+  User user = 3;
+  string env_name = 4;
+  string home = 5;
+  Labels port_forward = 6;
 }
 
 message SessionStart {
@@ -17,6 +24,12 @@ message SessionStart {
   string name = 4;
 
   PTYRequest pty = 5;
+
+  User user = 6;
+
+  string home = 7;
+  
+  Labels port_forward = 8;
 
   message EnvVar {
     string key = 1;
@@ -41,6 +54,10 @@ message Packet {
   WindowSize window_change = 3;
   Signal signal = 4;
   Exit exit = 5;
+
+  string status = 6;
+
+  SessionContinue continue = 7;
 
   enum Channel {
     STDIN = 0;

@@ -35,13 +35,15 @@ message ProvisionStatus {
   ContainerInfo container_info = 3;
   string last_error = 4;
   ResourceId container_ref = 5;
+  string status_details = 6;
 
   enum Status {
     UNKNOWN = 0;
     ADDING = 1;
     RUNNING = 2;
     SUSPENDED = 3;
-    DEAD = 4;
+    STOPPED = 4;
+    DEAD = 5;
   }
 }
 

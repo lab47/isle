@@ -72,9 +72,8 @@ func TestContainers(t *testing.T) {
 		defer db.Close()
 
 		var r ResourceStorage
-		r.log = log
 
-		err = r.Init(db)
+		err = r.Init(log, db)
 		require.NoError(t, err)
 
 		top, cancel := context.WithCancel(context.Background())

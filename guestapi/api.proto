@@ -4,6 +4,8 @@ package dev.lab47.isle.guestapi;
 
 option go_package = "lab47.dev/isle/guestapi";
 
+import "labels.proto";
+
 service GuestAPI {
   rpc AddApp(AddAppReq) returns (AddAppResp);
   rpc DisableApp(DisableAppReq) returns (DisableAppResp);
@@ -19,6 +21,8 @@ service HostAPI {
   rpc CancelPortForward(CancelPortForwardReq) returns (CancelPortForwardResp);
   rpc TrimMemory(TrimMemoryReq) returns (TrimMemoryResp);
 }
+
+message Empty {}
 
 message AddAppReq {
   string name = 1;
@@ -57,11 +61,14 @@ message RunningReq {
   string ip = 1;
 }
 
-message RunningResp { }
+message RunningResp {
+  string timezone = 1;
+}
 
 message StartPortForwardReq {
   int32 port = 1;
   string key = 2;
+  Labels target = 3;
 }
 
 message StartPortForwardResp { }
@@ -81,4 +88,33 @@ message TrimMemoryReq {
 
 message TrimMemoryResp {
   int32 total_memory = 1;
+}
+
+service VMAPI {
+  rpc SyncTime(SyncTimeReq) returns (SyncTimeResp);
+  rpc VMInfo(VMInfoReq) returns (VMInfoResp);
+}
+
+message SyncTimeReq {
+  bytes current_time = 2;
+}
+
+message SyncTimeResp {}
+
+message VMInfoReq {
+  string timezone = 1;
+}
+
+message VMInfoResp {
+  string ip = 1;
+}
+
+message CurrentTime {
+  int64 sec = 1;
+  int32 nsec = 2;
+  int32 offset = 3;
+}
+
+service StartupAPI  {
+  rpc VMRunning(RunningReq) returns (RunningResp) {}
 }

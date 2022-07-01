@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package dev.lab47.isle.timesync;
+
+option go_package = "lab47.dev/isle/guestapi/pkg/timesync";
+
+message NTPTimePacket {
+  int64 t1 = 1;
+  int64 t2 = 2;
+  int64 t3 = 3;
+  int64 t4 = 4;
+}
+
+service TimeSync  {
+  rpc TimeSync(stream NTPTimePacket) returns (stream NTPTimePacket) {}
+}

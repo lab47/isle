@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package dev.lab47.isle.pbstream;
+
+option go_package = "lab47.dev/isle/pkg/pbstream";
+
+message RPCHeader {
+  string selector = 1;
+}
+
+message RPCFooter {
+  oneof response {
+    Success success = 1;
+    Error error = 2;
+  }
+
+  message Success {}
+
+  message Error {
+    string msg = 1;
+  }
+}
+
+message RPCStreamHeader {
+  oneof operation {
+    Continue continue = 1;
+    RPCFooter footer = 2;
+  }
+
+  message Continue {}
+}
