@@ -31,6 +31,14 @@ type Connection struct {
 }
 
 func ConnectIO(log hclog.Logger, conn io.ReadWriteCloser) (*Connection, error) {
+	var hdr pbstream.ConnectionHeader
+	hdr.Multiplex = true
+
+	err := pbstream.WriteOne(conn, &hdr)
+	if err != nil {
+		return nil, err
+	}
+
 	cfg := yamux.DefaultConfig()
 
 	sess, err := yamux.Client(conn, cfg)
@@ -56,6 +64,18 @@ func Connect(log hclog.Logger, proto, addr string) (*Connection, error) {
 	}
 
 	return ConnectIO(log, conn)
+}
+
+func ConnectSingle(rwc io.ReadWriteCloser) error {
+	var hdr pbstream.ConnectionHeader
+	hdr.Multiplex = false
+
+	err := pbstream.WriteOne(rwc, &hdr)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 type Listener struct {
@@ -206,9 +226,18 @@ func (c *Connection) Session(sess *guestapi.SessionStart) (*pbstream.Stream, net
 		return nil, nil, err
 	}
 
-	rs, err := pbstream.Open(c.log, conn)
+	rs, err := StartSession(c.log, conn, sess)
 	if err != nil {
-		return nil, nil, errors.Wrapf(err, "starting pbstream")
+		return nil, nil, err
+	}
+
+	return rs, conn, nil
+}
+
+func StartSession(log hclog.Logger, rwc io.ReadWriteCloser, sess *guestapi.SessionStart) (*pbstream.Stream, error) {
+	rs, err := pbstream.Open(log, rwc)
+	if err != nil {
+		return nil, errors.Wrapf(err, "starting pbstream")
 	}
 
 	err = rs.Send(&guestapi.StreamHeader{
@@ -217,26 +246,27 @@ func (c *Connection) Session(sess *guestapi.SessionStart) (*pbstream.Stream, net
 		},
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	var ack guestapi.StreamAck
 
 	err = rs.Recv(&ack)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	switch sv := ack.Response.(type) {
 	case *guestapi.StreamAck_Ok:
 		// cool.
 	case *guestapi.StreamAck_Error:
-		return nil, nil, errors.Wrapf(ErrRemoteError, sv.Error)
+		return nil, errors.Wrapf(ErrRemoteError, sv.Error)
 	default:
-		return nil, nil, errors.Wrapf(ErrRemoteError, "valid response not seen")
+		return nil, errors.Wrapf(ErrRemoteError, "valid response not seen")
 	}
 
-	return rs, conn, nil
+	return rs, nil
+
 }
 
 func (c *Connection) Open(sel labels.Set) (*pbstream.Stream, net.Conn, error) {

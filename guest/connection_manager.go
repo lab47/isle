@@ -85,13 +85,102 @@ func (c *ConnectionManager) Serve(ctx context.Context, l net.Listener) error {
 			return nil
 		}
 
-		session, err := yamux.Server(conn, cfg)
-		if err != nil {
-			return err
+		go func() {
+			var hdr pbstream.ConnectionHeader
+
+			err = pbstream.ReadOne(conn, &hdr)
+			if err != nil {
+				c.L.Error("error reading connection header", "error", err)
+				return
+			}
+
+			if hdr.Multiplex {
+				session, err := yamux.Server(conn, cfg)
+				if err != nil {
+					c.L.Error("error starting yamux server", "error", err)
+					return
+				}
+
+				c.handleSession(session)
+			} else {
+				c.handleOne(ctx, conn, nil)
+			}
+		}()
+	}
+}
+
+func (c *ConnectionManager) handleOne(ctx context.Context, stream net.Conn, sess *yamux.Session) error {
+	rs, err := pbstream.Open(c.L, stream)
+	if err != nil {
+		c.L.Error("error connecting protobuf stream", "error", err)
+		return err
+	}
+
+	var hdr guestapi.StreamHeader
+
+	err = rs.Recv(&hdr)
+	if err != nil {
+		c.L.Error("error parsing stream header", "error", err)
+		return err
+	}
+
+	var ack guestapi.StreamAck
+
+	switch sv := hdr.Operation.(type) {
+	case *guestapi.StreamHeader_Register_:
+		if sess == nil {
+			ack.Response = &guestapi.StreamAck_Error{
+				Error: "no yamux session established",
+			}
+		} else {
+			c.registerSession(sess, sv.Register)
+			ack.Response = &guestapi.StreamAck_Ok{Ok: true}
 		}
 
-		go c.handleSession(session)
+		err = rs.Send(&ack)
+		if err != nil {
+			c.L.Error("error sending ack", "error", err)
+		}
+	case *guestapi.StreamHeader_Connect_:
+		err := c.handOffConnect(ctx, sv.Connect.Selector, rs, stream)
+		if err != nil {
+			ack.Response = &guestapi.StreamAck_Error{
+				Error: err.Error(),
+			}
+
+			err = rs.Send(&ack)
+			if err != nil {
+				c.L.Error("error sending ack", "error", err)
+			}
+		}
+
+	case *guestapi.StreamHeader_Session:
+		hdlr := c.SessionHandler
+
+		if hdlr == nil {
+			ack.Response = &guestapi.StreamAck_Error{
+				Error: "no session handler registered",
+			}
+
+			err = rs.Send(&ack)
+			if err != nil {
+				c.L.Error("error sending ack", "error", err)
+			}
+		} else {
+			ack.Response = &guestapi.StreamAck_Ok{Ok: true}
+
+			err = rs.Send(&ack)
+			if err != nil {
+				c.L.Error("error sending ack", "error", err)
+			}
+
+			hdlr.StartSession(c.ResourceContext.Under(ctx), rs, sv.Session)
+		}
+	default:
+		c.L.Error("unknown operation in header", "operation", hclog.Fmt("%T", sv))
 	}
+
+	return nil
 }
 
 func (c *ConnectionManager) handleSession(sess *yamux.Session) {
@@ -107,70 +196,7 @@ func (c *ConnectionManager) handleSession(sess *yamux.Session) {
 			return
 		}
 
-		rs, err := pbstream.Open(c.L, stream)
-		if err != nil {
-			c.L.Error("error connecting protobuf stream", "error", err)
-			continue
-		}
-
-		var hdr guestapi.StreamHeader
-
-		err = rs.Recv(&hdr)
-		if err != nil {
-			c.L.Error("error parsing stream header", "error", err)
-			continue
-		}
-
-		var ack guestapi.StreamAck
-
-		switch sv := hdr.Operation.(type) {
-		case *guestapi.StreamHeader_Register_:
-			c.registerSession(sess, sv.Register)
-
-			ack.Response = &guestapi.StreamAck_Ok{Ok: true}
-
-			err = rs.Send(&ack)
-			if err != nil {
-				c.L.Error("error sending ack", "error", err)
-			}
-		case *guestapi.StreamHeader_Connect_:
-			err := c.handOffConnect(ctx, sv.Connect.Selector, rs, stream)
-			if err != nil {
-				ack.Response = &guestapi.StreamAck_Error{
-					Error: err.Error(),
-				}
-
-				err = rs.Send(&ack)
-				if err != nil {
-					c.L.Error("error sending ack", "error", err)
-				}
-			}
-
-		case *guestapi.StreamHeader_Session:
-			hdlr := c.SessionHandler
-
-			if hdlr == nil {
-				ack.Response = &guestapi.StreamAck_Error{
-					Error: "no session handler registered",
-				}
-
-				err = rs.Send(&ack)
-				if err != nil {
-					c.L.Error("error sending ack", "error", err)
-				}
-			} else {
-				ack.Response = &guestapi.StreamAck_Ok{Ok: true}
-
-				err = rs.Send(&ack)
-				if err != nil {
-					c.L.Error("error sending ack", "error", err)
-				}
-
-				go hdlr.StartSession(c.ResourceContext.Under(ctx), rs, sv.Session)
-			}
-		default:
-			c.L.Error("unknown operation in header", "operation", hclog.Fmt("%T", sv))
-		}
+		go c.handleOne(ctx, stream, sess)
 	}
 }
 

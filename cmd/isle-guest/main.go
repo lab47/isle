@@ -25,6 +25,9 @@ import (
 	"github.com/spf13/pflag"
 	"go.etcd.io/bbolt"
 	"golang.org/x/sys/unix"
+
+	"net/http"
+	_ "net/http/pprof"
 )
 
 var (
@@ -47,6 +50,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "guest must run as root\n")
 		os.Exit(1)
 	}
+
+	go func() {
+		fmt.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+	}()
 
 	if *fHosted {
 		runHosted()

@@ -19,7 +19,6 @@ import (
 
 	"github.com/containerd/console"
 	"github.com/containerd/containerd/archive"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
@@ -154,7 +153,10 @@ func NewContainerManager(inj *do.Injector) (*ContainerManager, error) {
 		return nil, err
 	}
 
-	nodeId := NewUniqueId()
+	nodeId, _ := do.InvokeNamed[string](inj, "node-id")
+	if nodeId == "" {
+		nodeId = NewUniqueId()
+	}
 
 	var cm ContainerManager
 	cm.conMan = conMan
@@ -265,8 +267,10 @@ func (m *ContainerManager) restartContainers(ctx *ResourceContext) error {
 			return err
 		}
 
-		if res.ProvisionStatus.Status == guestapi.ProvisionStatus_RUNNING ||
-			res.ProvisionStatus.Status == guestapi.ProvisionStatus_STOPPED {
+		status := res.ProvisionStatus.Status
+
+		switch status {
+		case guestapi.ProvisionStatus_RUNNING, guestapi.ProvisionStatus_STOPPED:
 			cont, ok := raw.(*guestapi.Container)
 			if !ok {
 				return errors.Wrapf(ErrInvalidResource, "container type not a container")
@@ -283,6 +287,9 @@ func (m *ContainerManager) restartContainers(ctx *ResourceContext) error {
 			if err != nil {
 				return err
 			}
+		default:
+			m.L.Info("deleting old container", "id", res.Id.Short(), "status", status.String())
+			ctx.Delete(ctx, res.Id)
 		}
 	}
 
@@ -383,7 +390,17 @@ func (m *ContainerManager) Create(ctx *ResourceContext, cont *guestapi.Container
 			return nil, err
 		}
 
-		if len(resources) != 0 {
+		var valid int
+
+		// allow duplicate stable names when one is dead.
+		for _, r := range resources {
+			switch r.ProvisionStatus.Status {
+			case guestapi.ProvisionStatus_ADDING, guestapi.ProvisionStatus_RUNNING:
+				valid++
+			}
+		}
+
+		if valid > 0 {
 			return nil, errors.Wrapf(ErrConflict, "container with name already exist: %s", cont.StableName)
 		}
 	}
@@ -1427,9 +1444,9 @@ func (m *ContainerManager) Exec(ctx context.Context, res *guestapi.Resource, pro
 }
 
 type ExecSession struct {
-	Stdout io.Reader
-	Stderr io.Reader
-	Stdin  io.Writer
+	Stdout io.ReadCloser
+	Stderr io.ReadCloser
+	Stdin  io.WriteCloser
 
 	Pid  int
 	Done chan runc.Exit
@@ -1475,7 +1492,6 @@ func (m *ContainerManager) ExecToStream(ctx context.Context, res *guestapi.Resou
 
 	var r runc.Runc
 	r.Root = m.cfg.RuncRoot
-	r.Debug = true
 
 	pio, err := runc.NewPipeIO(int(proc.User.UID), int(proc.User.GID))
 	if err != nil {
@@ -1494,8 +1510,6 @@ func (m *ContainerManager) ExecToStream(ctx context.Context, res *guestapi.Resou
 	defer os.RemoveAll(tmpdir)
 
 	pidPath := filepath.Join(tmpdir, "pid")
-
-	m.L.Trace("executing proc via runc", "spec", spew.Sdump(proc))
 
 	ch := m.reaper.Subscribe()
 

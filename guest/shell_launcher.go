@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/containerd/console"
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/pkg/pbstream"
+	"github.com/lab47/isle/signal"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/samber/do"
 	"golang.org/x/exp/slices"
@@ -302,6 +304,8 @@ func (s *activeSession) runCommand(ctx *ResourceContext) {
 }
 
 func (s *activeSession) runWithoutTerminal(ctx *ResourceContext) {
+	s.sl.L.Info("running command without terminal", "cmd", s.proc.Args)
+
 	exitCh := s.sl.cm.reaper.Subscribe()
 	defer s.sl.cm.reaper.Unsubscribe(exitCh)
 
@@ -340,19 +344,38 @@ func (s *activeSession) runWithoutTerminal(ctx *ResourceContext) {
 				return
 			}
 
-			_, err = es.Stdin.Write(writePkt.Data)
-			if err != nil {
-				if !errors.Is(err, io.EOF) {
-					s.sl.L.Error("error writing data to terminal", "error", err)
+			if writePkt.ChannelClose {
+				es.Stdin.Close()
+			}
+
+			if writePkt.Data != nil {
+				_, err = es.Stdin.Write(writePkt.Data)
+				if err != nil {
+					if !errors.Is(err, io.EOF) {
+						s.sl.L.Error("error writing data to terminal", "error", err)
+					}
+					return
 				}
-				return
+			}
+
+			if writePkt.Signal != nil {
+				sig, ok := signal.TransportToOS[writePkt.Signal.Signal]
+				if ok {
+					s.sl.L.Info("signaling container", "signal", writePkt.Signal.Signal, "pid", es.Pid)
+
+					unix.Kill(es.Pid, sig)
+				} else {
+					s.sl.L.Warn("ignore unknown signal", "signal", writePkt.Signal.Signal)
+				}
 			}
 		}
 	}()
 
-	readDone := make(chan struct{})
+	readDone := make(chan struct{}, 2)
 	go func() {
-		defer close(readDone)
+		defer func() {
+			readDone <- struct{}{}
+		}()
 
 		readBuf := make([]byte, 1024)
 		var readPkt guestapi.Packet
@@ -360,13 +383,38 @@ func (s *activeSession) runWithoutTerminal(ctx *ResourceContext) {
 		for {
 			n, err := es.Stdout.Read(readBuf)
 			if err != nil {
+				s.sl.L.Info("detected commands stdout errored", "error", err)
 				return
 			}
 
 			readPkt.Channel = guestapi.Packet_STDOUT
 			readPkt.Data = readBuf[:n]
 
-			// s.sl.L.Trace("transmitting data", "packet", spew.Sdump(&readPkt))
+			err = s.rs.Send(&readPkt)
+			if err != nil {
+				s.sl.L.Error("error sending stdout data", "error", err)
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer func() {
+			readDone <- struct{}{}
+		}()
+
+		readBuf := make([]byte, 1024)
+		var readPkt guestapi.Packet
+
+		for {
+			n, err := es.Stderr.Read(readBuf)
+			if err != nil {
+				s.sl.L.Info("detected commands stdout errored", "error", err)
+				return
+			}
+
+			readPkt.Channel = guestapi.Packet_STDERR
+			readPkt.Data = readBuf[:n]
 
 			err = s.rs.Send(&readPkt)
 			if err != nil {
@@ -393,11 +441,14 @@ loop:
 		}
 	}
 
-	select {
-	case <-ctx.Done():
-		return
-	case <-readDone:
-		// ok
+	// run twice, once for stdout, once for stderr
+	for i := 0; i < 2; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-readDone:
+			// ok
+		}
 	}
 
 	s.sl.L.Debug("exec finished", "code", exitCode)
@@ -413,6 +464,8 @@ loop:
 }
 
 func (s *activeSession) runInTerminal(ctx *ResourceContext) {
+	s.sl.L.Info("running command with terminal", "cmd", s.proc.Args)
+
 	exitCh := s.sl.cm.reaper.Subscribe()
 	defer s.sl.cm.reaper.Unsubscribe(exitCh)
 
@@ -450,12 +503,37 @@ func (s *activeSession) runInTerminal(ctx *ResourceContext) {
 				return
 			}
 
-			_, err = ts.Write(writePkt.Data)
-			if err != nil {
-				if !errors.Is(err, io.EOF) {
-					s.sl.L.Error("error writing data to terminal", "error", err)
+			if writePkt.ChannelClose {
+				ts.Close()
+			}
+
+			if writePkt.Data != nil {
+				_, err = ts.Write(writePkt.Data)
+				if err != nil {
+					if !errors.Is(err, io.EOF) {
+						s.sl.L.Error("error writing data to terminal", "error", err)
+					}
+					return
 				}
-				return
+			}
+
+			if writePkt.Signal != nil {
+				sig, ok := signal.TransportToOS[writePkt.Signal.Signal]
+				if ok {
+					s.sl.L.Info("signaling container", "signal", writePkt.Signal.Signal, "pid", ts.Pid)
+
+					unix.Kill(ts.Pid, sig)
+				} else {
+					s.sl.L.Warn("ignore unknown signal", "signal", writePkt.Signal.Signal)
+				}
+			}
+
+			if ws := writePkt.WindowChange; ws != nil {
+				s.sl.L.Info("adjusting window size", "height", ws.Height, "width", ws.Width)
+				ts.Resize(console.WinSize{
+					Height: uint16(ws.Height),
+					Width:  uint16(ws.Width),
+				})
 			}
 		}
 	}()

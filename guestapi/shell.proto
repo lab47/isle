@@ -59,6 +59,8 @@ message Packet {
 
   SessionContinue continue = 7;
 
+  bool channel_close = 8;
+
   enum Channel {
     STDIN = 0;
     STDOUT = 1;

@@ -49,6 +49,69 @@ func Open(log hclog.Logger, rw io.ReadWriter) (*Stream, error) {
 	return s, nil
 }
 
+// ReadOne pulls data out of a reader to read one proto message. Unless
+// the Reader is also a ByteReader, this is not effecient, but it is correct.
+func ReadOne(r io.Reader, msg proto.Message) error {
+	var (
+		sz  uint64
+		err error
+	)
+
+	if br, ok := r.(io.ByteReader); ok {
+		sz, err = binary.ReadUvarint(br)
+	} else {
+		szBuf := make([]byte, 1)
+
+		var x uint64
+		var s uint
+		for i := 0; i < binary.MaxVarintLen64; i++ {
+			_, err = r.Read(szBuf)
+			if err != nil {
+				return err
+			}
+			b := szBuf[0]
+			if b < 0x80 {
+				if i == binary.MaxVarintLen64-1 && b > 1 {
+					return io.EOF
+				}
+				sz = x | uint64(b)<<s
+				break
+			} else {
+				x |= uint64(b&0x7f) << s
+				s += 7
+			}
+		}
+	}
+
+	if err != nil {
+		return err
+	}
+
+	buf := make([]byte, sz)
+	_, err = io.ReadFull(r, buf)
+	if err != nil {
+		return err
+	}
+
+	return proto.Unmarshal(buf, msg)
+}
+
+// WriteOne sends one message to the writer only.
+func WriteOne(w io.Writer, msg proto.Message) error {
+	data, err := proto.Marshal(msg)
+	if err != nil {
+		return err
+	}
+
+	writeBuf := make([]byte, 9)
+
+	sz := binary.PutUvarint(writeBuf, uint64(len(data)))
+
+	w.Write(writeBuf[:sz])
+	_, err = w.Write(data)
+	return err
+}
+
 func (s *Stream) Close() error {
 	if s.closer != nil {
 		return s.closer.Close()
@@ -62,6 +125,10 @@ func (s *Stream) Recv(msg proto.Message) error {
 	return err
 }
 
+type fastUnmarshal interface {
+	FastUnmarshalProto(b []byte) error
+}
+
 func (s *Stream) RecvTimed(msg proto.Message) (time.Time, error) {
 	sz, err := binary.ReadUvarint(s.br)
 	if err != nil {
@@ -73,6 +140,15 @@ func (s *Stream) RecvTimed(msg proto.Message) (time.Time, error) {
 		data, err := s.br.Peek(int(sz))
 		if err == nil {
 			t := time.Now()
+
+			if fm, ok := msg.(fastUnmarshal); ok {
+				err = fm.FastUnmarshalProto(data)
+				if err == nil {
+					s.br.Discard(int(sz))
+					return t, nil
+				}
+			}
+
 			err = s.uo.Unmarshal(data, msg)
 			s.br.Discard(int(sz))
 			return t, err
@@ -91,6 +167,13 @@ func (s *Stream) RecvTimed(msg proto.Message) (time.Time, error) {
 
 	t := time.Now()
 
+	if fm, ok := msg.(fastUnmarshal); ok {
+		err = fm.FastUnmarshalProto(s.readBuf[:sz])
+		if err == nil {
+			return t, nil
+		}
+	}
+
 	return t, s.uo.Unmarshal(s.readBuf[:sz], msg)
 }
 
@@ -102,6 +185,18 @@ func (s *Stream) Send(msg proto.Message) error {
 
 	s.writeBuf = data[:cap(data)]
 
+	sz := binary.PutUvarint(s.szBuf, uint64(len(data)))
+
+	s.bw.Write(s.szBuf[:sz])
+	s.bw.Write(data)
+
+	return s.bw.Flush()
+}
+
+// SendPremarshaled transmits the data as it normally would a marshaled
+// protobuf. This is available to allow users to provide their own
+// protobuf marshaling. This is useful for specialized cases only.
+func (s *Stream) SendPremarshaled(data []byte) error {
 	sz := binary.PutUvarint(s.szBuf, uint64(len(data)))
 
 	s.bw.Write(s.szBuf[:sz])

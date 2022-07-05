@@ -6,21 +6,24 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"os/user"
+	"sync"
 
 	"github.com/creack/pty"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/host"
 	"github.com/lab47/isle/pkg/labels"
 	"github.com/lab47/isle/pkg/pbstream"
+	islesignal "github.com/lab47/isle/signal"
 	"github.com/mattn/go-isatty"
 	"github.com/pkg/errors"
 	"github.com/samber/do"
 	"golang.org/x/crypto/ssh/terminal"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sys/unix"
 )
 
 type Connector struct {
@@ -227,10 +230,10 @@ func (c *Connection) StartSession(ctx context.Context, info *SessionInfo, status
 
 	var useTerm bool
 
-	if isatty.IsTerminal(os.Stdout.Fd()) {
+	if isatty.IsTerminal(os.Stdin.Fd()) {
 		useTerm = true
 
-		winsz, err := pty.GetsizeFull(os.Stdout)
+		winsz, err := pty.GetsizeFull(os.Stdin)
 		if err != nil {
 			return err
 		}
@@ -267,20 +270,98 @@ func (c *Connection) StartSession(ctx context.Context, info *SessionInfo, status
 		status.UpdateStatus("Starting " + start.Name)
 	}
 
+	return handleSession(ctx, rs, status, useTerm)
+}
+
+type Single struct {
+	rwc io.ReadWriteCloser
+	log hclog.Logger
+}
+
+func OpenSingle(log hclog.Logger, rwc io.ReadWriteCloser) (*Single, error) {
+	s := &Single{
+		rwc: rwc,
+		log: log,
+	}
+
+	err := host.ConnectSingle(rwc)
+	if err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+func (s *Single) StartSession(ctx context.Context, info *SessionInfo, status Statuser) error {
+	err := info.Validate()
+	if err != nil {
+		return err
+	}
+
+	u, err := user.Current()
+	if err != nil {
+		return errors.Wrapf(err, "error reading current user")
+	}
+
+	start := &guestapi.SessionStart{
+		Name:  info.Name,
+		Image: info.Image,
+		Args:  info.Args,
+		User: &guestapi.User{
+			Username: u.Username,
+			Uid:      int32(os.Getuid()),
+			Gid:      int32(os.Getgid()),
+		},
+		Home: u.HomeDir,
+	}
+
+	var useTerm bool
+
+	if isatty.IsTerminal(os.Stdin.Fd()) {
+		useTerm = true
+
+		winsz, err := pty.GetsizeFull(os.Stdin)
+		if err != nil {
+			return err
+		}
+
+		start.Pty = &guestapi.SessionStart_PTYRequest{
+			Term: os.Getenv("TERM"),
+			WindowSize: &guestapi.Packet_WindowSize{
+				Width:  int32(winsz.Cols),
+				Height: int32(winsz.Rows),
+			},
+		}
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	rs, err := host.StartSession(s.log, s.rwc, start)
+	if err != nil {
+		return errors.Wrapf(err, "sending session start message")
+	}
+
+	if status != nil {
+		status.UpdateStatus("Starting " + start.Name)
+	}
+
+	return handleSession(ctx, rs, status, useTerm)
+}
+
+func handleSession(ctx context.Context, rs *pbstream.Stream, status Statuser, useTerm bool) error {
 	var sc *guestapi.SessionContinue
 	for sc == nil {
 		var pkt guestapi.Packet
 
-		err = rs.Recv(&pkt)
+		err := rs.Recv(&pkt)
 		if err != nil {
 			return errors.Wrapf(err, "error receiving session continue")
 		}
 
-		spew.Dump(&pkt)
-
 		if pkt.Status != "" {
 			if status != nil {
-				status.UpdateStatus("Starting " + start.Name)
+				status.UpdateStatus(pkt.Status)
 			}
 		}
 
@@ -289,7 +370,9 @@ func (c *Connection) StartSession(ctx context.Context, info *SessionInfo, status
 		}
 	}
 
-	status.ClearStatus()
+	if status != nil {
+		status.ClearStatus()
+	}
 
 	if sc.Error != "" {
 		return fmt.Errorf("remote error: %s", sc.Error)
@@ -302,21 +385,82 @@ func (c *Connection) StartSession(ctx context.Context, info *SessionInfo, status
 		}
 	}
 
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, islesignal.CompleteSet...)
+
+	defer signal.Stop(sigCh)
+
+	winCh := make(chan os.Signal, 1)
+	signal.Notify(winCh, unix.SIGWINCH)
+
+	defer signal.Stop(winCh)
+
+	var mu sync.Mutex
+
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case sig := <-sigCh:
+				tSig, ok := islesignal.OSToTransport[sig]
+				if ok {
+					var pkt guestapi.Packet
+					pkt.Signal = &guestapi.Packet_Signal{
+						Signal: tSig,
+					}
+
+					mu.Lock()
+					rs.Send(&pkt)
+					mu.Unlock()
+				}
+			case <-winCh:
+				winsz, err := pty.GetsizeFull(os.Stdin)
+				if err != nil {
+					continue
+				}
+
+				var pkt guestapi.Packet
+				pkt.WindowChange = &guestapi.Packet_WindowSize{
+					Width:  int32(winsz.Cols),
+					Height: int32(winsz.Rows),
+				}
+
+				mu.Lock()
+				rs.Send(&pkt)
+				mu.Unlock()
+			}
+		}
+	}()
+
 	go func() {
 		var pkt guestapi.Packet
+		pkt.Channel = guestapi.Packet_STDIN
 
-		buf := make([]byte, 1024)
+		buf := make([]byte, 4096)
+		mbuf := make([]byte, 4096+48)
 
 		for {
+			pkt.Data = nil
+
 			n, err := os.Stdin.Read(buf)
 			if err != nil {
+				pkt.ChannelClose = true
+
+				mu.Lock()
+				rs.Send(&pkt)
+				mu.Unlock()
 				return
 			}
 
 			pkt.Data = buf[:n]
-			pkt.Channel = guestapi.Packet_STDIN
 
-			err = rs.Send(&pkt)
+			data := pkt.FastDataOnlyMarshal(mbuf[:0])
+
+			mu.Lock()
+			err = rs.SendPremarshaled(data)
+			mu.Unlock()
+
 			if err != nil {
 				return
 			}
@@ -326,7 +470,7 @@ func (c *Connection) StartSession(ctx context.Context, info *SessionInfo, status
 	var pkt guestapi.Packet
 
 	for {
-		err = rs.Recv(&pkt)
+		err := rs.Recv(&pkt)
 		if err != nil {
 			return errors.Wrapf(err, "error recieving data packet")
 		}
@@ -337,7 +481,11 @@ func (c *Connection) StartSession(ctx context.Context, info *SessionInfo, status
 
 		switch pkt.Channel {
 		case guestapi.Packet_STDOUT:
-			os.Stdout.Write(pkt.Data)
+			if pkt.ChannelClose {
+				os.Stdout.Close()
+			} else {
+				os.Stdout.Write(pkt.Data)
+			}
 		case guestapi.Packet_STDERR:
 			os.Stderr.Write(pkt.Data)
 		}
