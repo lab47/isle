@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/go-hclog"
+	"github.com/jessevdk/go-flags"
 	"github.com/lab47/isle/client"
 	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/host"
@@ -368,7 +369,7 @@ func (c *CLI) runDarwin(args []string) error {
 	return nil
 }
 
-func (c *CLI) Run(args []string) error {
+func (c *CLI) Run3(args []string) error {
 	updateBanner("System booting...")
 
 	fs := pflag.NewFlagSet("isle", pflag.ExitOnError)
@@ -424,6 +425,34 @@ func (c *CLI) Run(args []string) error {
 
 	err = conn.StartSession(ctx, info, bannerStatus{})
 	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *CLI) Run(args []string) error {
+	parser := flags.NewNamedParser("isle", flags.Default)
+	parser.AddCommand("start",
+		"start the background manager",
+		"start the background manager process",
+		&StartCmd{},
+	)
+
+	parser.AddCommand("run",
+		"run a command",
+		"run a command inside an environment",
+		&RunCmd{},
+	)
+
+	_, err := parser.ParseArgs(args[1:])
+	if err != nil {
+		if perr, ok := err.(*flags.Error); ok {
+			if perr.Type == flags.ErrHelp {
+				return nil
+			}
+		}
+
 		return err
 	}
 

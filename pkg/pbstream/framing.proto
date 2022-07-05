@@ -4,6 +4,10 @@ package dev.lab47.isle.pbstream;
 
 option go_package = "lab47.dev/isle/pkg/pbstream";
 
+message ConnectionHeader {
+  bool multiplex = 1;
+}
+
 message RPCHeader {
   string selector = 1;
 }

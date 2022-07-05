@@ -1,7 +1,6 @@
 package guest
 
 import (
-	"context"
 	"io"
 	"net"
 	"os"
@@ -15,8 +14,6 @@ import (
 	"github.com/lab47/isle/pkg/labels"
 	"github.com/pkg/errors"
 	"github.com/samber/do"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type ShellManager struct {
@@ -102,21 +99,6 @@ func (m *ShellManager) Init(ctx *ResourceContext) error {
 	}
 
 	m.schema = s
-
-	/*
-		serv := grpc.NewServer()
-
-		guestapi.RegisterGuestAPIServer(serv, m)
-
-		m.L.Info("starting api listener")
-
-		li, err := net.Listen("tcp", "0.0.0.0:1212")
-		if err != nil {
-			return err
-		}
-
-		go serv.Serve(li)
-	*/
 
 	return m.restartSessions(ctx)
 }
@@ -219,9 +201,15 @@ func (m *ShellManager) restartSessions(ctx *ResourceContext) error {
 			return errors.Wrapf(ErrInvalidResource, "not a shell session")
 		}
 
-		err = m.restartSession(ctx, res, sess)
-		if err != nil {
-			return err
+		switch res.ProvisionStatus.Status {
+		case guestapi.ProvisionStatus_RUNNING, guestapi.ProvisionStatus_STOPPED:
+			err = m.restartSession(ctx, res, sess)
+			if err != nil {
+				return err
+			}
+		default:
+			m.L.Info("prune old shell session", "id", res.Id.Short())
+			ctx.Delete(ctx, res.Id)
 		}
 	}
 
@@ -290,7 +278,8 @@ loop:
 			case guestapi.ProvisionStatus_DEAD, guestapi.ProvisionStatus_SUSPENDED:
 				m.L.Error("container died for shell during provisioning")
 				err := ctx.UpdateProvision(ctx, shell.Id, &guestapi.ProvisionStatus{
-					Status: guestapi.ProvisionStatus_DEAD,
+					Status:    guestapi.ProvisionStatus_DEAD,
+					LastError: status.LastError,
 				})
 
 				if err != nil {
@@ -312,59 +301,6 @@ loop:
 	if err != nil {
 		m.L.Error("error updating shell provision status", "error", err)
 	}
-}
-
-func (g *ShellManager) AddApp(ctx context.Context, req *guestapi.AddAppReq) (*guestapi.AddAppResp, error) {
-	return nil, status.New(codes.Unimplemented, "add-app to be removed").Err()
-}
-
-func (g *ShellManager) DisableApp(ctx context.Context, req *guestapi.DisableAppReq) (*guestapi.DisableAppResp, error) {
-	return nil, status.New(codes.Unimplemented, "add-app to be removed").Err()
-}
-
-func (g *ShellManager) RunOnMac(s guestapi.GuestAPI_RunOnMacServer) error {
-	if g.hostDelegate == nil {
-		return RunCommand(s)
-	}
-
-	c, err := g.hostDelegate.RunOnMac(s.Context())
-	if err != nil {
-		return err
-	}
-
-	go func() {
-		for {
-			m, err := c.Recv()
-			if err != nil {
-				return
-			}
-
-			err = s.Send(m)
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	for {
-		m, err := s.Recv()
-		if err != nil {
-			return err
-		}
-
-		err = c.Send(m)
-		if err != nil {
-			return err
-		}
-	}
-}
-
-func (g *ShellManager) TrimMemory(ctx context.Context, req *guestapi.TrimMemoryReq) (*guestapi.TrimMemoryResp, error) {
-	if g.hostDelegate == nil {
-		return nil, status.New(codes.Unimplemented, "no access no host for memory trimming").Err()
-	}
-
-	return g.hostDelegate.TrimMemory(ctx, req)
 }
 
 func (m *ShellManager) startSSHAgent(path string, user *guestapi.User) {
