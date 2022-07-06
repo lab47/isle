@@ -2,6 +2,8 @@ package isle
 
 import (
 	"context"
+	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"path/filepath"
@@ -43,6 +45,24 @@ func ComputeStateDir(dir string) (string, error) {
 	return dir, nil
 }
 
+func (c *RunCmd) probeBackend() bool {
+	pidPath := filepath.Join(c.stateDir, "vm.pid")
+
+	data, err := ioutil.ReadFile(pidPath)
+	if err == nil {
+		var pid int
+
+		fmt.Sscanf(string(data), "%d", &pid)
+
+		err = unix.Kill(pid, 0)
+		if err == nil {
+			return true
+		}
+	}
+
+	return false
+}
+
 func (c *RunCmd) Execute(args []string) error {
 	var status client.Statuser
 	if isatty.IsTerminal(os.Stdin.Fd()) {
@@ -75,6 +95,14 @@ func (c *RunCmd) Execute(args []string) error {
 	err = c.osSetup()
 	if err != nil {
 		return err
+	}
+
+	if !c.probeBackend() {
+		log.Info("automatically starting backend")
+		err = c.osStartBackground()
+		if err != nil {
+			return err
+		}
 	}
 
 	inj := do.New()
@@ -129,7 +157,6 @@ func (c *RunCmd) Execute(args []string) error {
 	}
 
 	return nil
-
 }
 
 func (c *RunCmd) UseSession(log hclog.Logger, addr string, connector *client.Connector) (*client.Single, error) {

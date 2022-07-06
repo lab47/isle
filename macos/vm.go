@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/signal"
 	"os/user"
 	"path/filepath"
 	"runtime"
@@ -62,6 +63,19 @@ type VM struct {
 
 	vmConsoleReader *os.File
 	vmConsoleWriter *os.File
+
+	eventCh chan Event
+}
+
+type EventType int
+
+const (
+	VMStarted EventType = iota
+	VMStopped
+)
+
+type Event struct {
+	Type EventType
 }
 
 func NewVM(log hclog.Logger, stateDir string, cfg config.Config) (*VM, error) {
@@ -221,6 +235,20 @@ func (v *VM) Setup() error {
 	return nil
 }
 
+func (v *VM) SetEventCh(eventCh chan Event) {
+	v.eventCh = eventCh
+}
+
+func (v *VM) sendEvent(ev Event) {
+	if v.eventCh == nil {
+		return
+	}
+
+	go func() {
+		v.eventCh <- ev
+	}()
+}
+
 func (v *VM) Run(ctx context.Context) error {
 	err := v.Setup()
 	if err != nil {
@@ -301,7 +329,6 @@ func (v *VM) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		vm.RequestStop()
 		return ctx.Err()
 	case err := <-errCh:
 		if err != nil {
@@ -323,6 +350,24 @@ func (v *VM) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			v.log.Info("attempting to shutdown VM")
+
+			sub := context.Background()
+
+			sub, cancel := signal.NotifyContext(sub, unix.SIGTERM, unix.SIGQUIT)
+			defer cancel()
+
+			v.requestShutdown(sub, sock)
+
+			for {
+				select {
+				case <-sub.Done():
+					v.log.Info("shutdown wait aborted")
+					return nil
+				case <-v.shutdownCh:
+					v.log.Info("vm has shutdown")
+					return nil
+				}
+			}
 		case <-v.shutdownCh:
 			v.log.Info("vm has shutdown")
 			return nil
@@ -335,6 +380,9 @@ func (v *VM) Run(ctx context.Context) error {
 
 			if newState == vz.VirtualMachineStateStopped {
 				v.log.Debug("stopped successfully")
+				v.sendEvent(Event{
+					Type: VMStarted,
+				})
 				return nil
 			}
 
@@ -360,56 +408,45 @@ func (v *VM) handleConsole() error {
 	}
 }
 
-func (v *VM) connectToGuest(ctx context.Context, sockdev *vz.VirtioSocketDevice) error {
-	var (
-		conn *vz.VirtioSocketConnection
-		err  error
-	)
+func (v *VM) requestShutdown(ctx context.Context, sockdev *vz.VirtioSocketDevice) error {
+	var outer error
 
-	sockdev.ConnectToPort(47, func(localConn *vz.VirtioSocketConnection, localErr error) {
-		conn = localConn
-		err = localErr
+	sockdev.ConnectToPort(47, func(conn *vz.VirtioSocketConnection, localErr error) {
+		if localErr != nil {
+			v.log.Error("error connecting to guest", "error", localErr)
+			outer = localErr
+			return
+		}
+
+		if conn == nil {
+			v.log.Error("no connection set")
+			outer = fmt.Errorf("error connecting to socket device port")
+			return
+		}
+
+		defer conn.Close()
+
+		client, err := host.ConnectIO(v.log, conn)
+		if err != nil {
+			outer = err
+			return
+		}
+
+		vmClient := guestapi.PBSNewVMAPIClient(pbstream.StreamOpenFunc(func() (*pbstream.Stream, error) {
+			rs, _, err := client.Open(labels.New("component", "vm"))
+			return rs, err
+		}))
+
+		_, err = vmClient.RequestShutdown(ctx, pbstream.NewRequest(&guestapi.Empty{}))
+		if err != nil {
+			outer = err
+			return
+		}
+
+		return
 	})
 
-	if err != nil {
-		v.log.Error("error connecting to guest", "error", err)
-		return err
-	}
-
-	if conn == nil {
-		v.log.Error("no connection set")
-		return fmt.Errorf("error connecting to socket device port")
-	}
-
-	client, err := host.ConnectIO(v.log, conn)
-	if err != nil {
-		conn.Close()
-		return err
-	}
-
-	vmClient := guestapi.PBSNewVMAPIClient(pbstream.StreamOpenFunc(func() (*pbstream.Stream, error) {
-		rs, _, err := client.Open(labels.New("component", "vm"))
-		return rs, err
-	}))
-
-	var req guestapi.VMInfoReq
-
-	path, err := os.Readlink("/etc/localtime")
-	if err == nil {
-		idx := strings.Index(path, "/zoneinfo/")
-		if idx != -1 {
-			req.Timezone = path[idx+10:]
-		}
-	}
-
-	resp, err := vmClient.VMInfo(ctx, pbstream.NewRequest(&req))
-	if err != nil {
-		return err
-	}
-
-	v.log.Info("detected vm ip", "ip", resp.Value.Ip)
-
-	return nil
+	return outer
 }
 
 func (v *VM) VMRunning(ctx context.Context, req *pbstream.Request[guestapi.RunningReq]) (*pbstream.Response[guestapi.RunningResp], error) {
@@ -424,6 +461,10 @@ func (v *VM) VMRunning(ctx context.Context, req *pbstream.Request[guestapi.Runni
 	}
 
 	v.log.Info("vm running", "ip", req.Value.Ip, "timezone", tz)
+
+	v.sendEvent(Event{
+		Type: VMStarted,
+	})
 
 	return pbstream.NewResponse(&guestapi.RunningResp{
 		Timezone: tz,

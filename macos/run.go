@@ -3,13 +3,18 @@ package macos
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"time"
 
 	"github.com/containerd/console"
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/cli/config"
+	"github.com/pkg/errors"
 )
 
 func loadConfig(log hclog.Logger, path string) config.Config {
@@ -47,11 +52,75 @@ func StartVMInForeground(ctx context.Context, log hclog.Logger, dir string, atta
 		os.Exit(1)
 	}
 
+	bgStr := os.Getenv("_VM_BACKGROUND")
+	if bgStr != "" {
+		wp := os.NewFile(3, "pipe")
+
+		eventCh := make(chan Event, 1)
+
+		vm.SetEventCh(eventCh)
+
+		go func() {
+			var startupHandled bool
+
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case ev := <-eventCh:
+					if startupHandled {
+						continue
+					}
+
+					switch ev.Type {
+					case VMStarted:
+						fmt.Fprintf(wp, "+")
+						startupHandled = true
+						wp.Close()
+
+					case VMStopped:
+						fmt.Fprintf(wp, "!")
+						startupHandled = true
+						wp.Close()
+					}
+				}
+			}
+		}()
+	}
+
+	pidPath := filepath.Join(dir, "vm.pid")
+	pf, err := os.Create(pidPath)
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Fprintln(pf, os.Getpid())
+
+	pf.Close()
+
+	defer os.Remove(pidPath)
+
 	if attach {
 		vm.SetConsoleIO(os.Stdin, os.Stdout)
 		c := console.Current()
 		c.SetRaw()
 		defer c.Reset()
+	} else {
+		f, err := os.Create(filepath.Join(dir, "vm.log"))
+		if err != nil {
+			log.Error("error creating vm log", "error", err)
+			return err
+		}
+
+		r, w := io.Pipe()
+
+		go func() {
+			time.Sleep(5 * time.Second)
+			fmt.Fprintf(w, "\ntail -f /var/log/isle-guest.log\n")
+		}()
+
+		// Redirect output to vm.log, including the guest log
+		vm.SetConsoleIO(r, f)
 	}
 
 	log.Info("running vm")
@@ -77,6 +146,15 @@ func BackgroundExec() {
 	StartVMInForeground(ctx, log, dir, false)
 }
 
-func RunInBackground(dir string) {
-	os.Setenv(EnvStateDir, dir)
+func RunInBackground(dir string) error {
+	execPath, err := os.Executable()
+	if err != nil {
+		return errors.Wrapf(err, "unable to calculate executable to start")
+	}
+
+	cmd := exec.Command(execPath, "start", "--state-dir="+dir, "--bg-start")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
 }
