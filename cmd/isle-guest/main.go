@@ -255,17 +255,27 @@ func runNative() {
 
 	startClient := guestapi.PBSNewStartupAPIClient(opener)
 
-	resp, err := startClient.VMRunning(ctx, pbstream.NewRequest(&guestapi.RunningReq{
-		Ip: probIP(log),
-	}))
-	if err != nil {
-		log.Error("error making startup call to host", "error", err)
-		os.Exit(1)
-	}
+	eventCh := make(chan guest.RunEvent, 1)
 
-	log.Info("sync'd with host", "timezone", resp.Value.Timezone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case ev := <-eventCh:
+			if ev.Type == guest.Running {
+				log.Info("signaling to host that we're ready")
+				resp, err := startClient.VMRunning(ctx, pbstream.NewRequest(&guestapi.RunningReq{
+					Ip: probIP(log),
+				}))
+				if err != nil {
+					log.Error("error making startup call to host", "error", err)
+				}
+				log.Info("sync'd with host", "timezone", resp.Value.Timezone)
 
-	setTZFile(log, resp.Value.Timezone)
+				setTZFile(log, resp.Value.Timezone)
+			}
+		}
+	}()
 
 	go func() {
 		log.Info("starting background timesync")
@@ -290,6 +300,7 @@ func runNative() {
 		Listener:  l,
 		HostBinds: *fHostBinds,
 		ClusterId: vars["cluster_id"],
+		EventsCh:  eventCh,
 	})
 	if err != nil {
 		log.Error("error running guest", "error", err)

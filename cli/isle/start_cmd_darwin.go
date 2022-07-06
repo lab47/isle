@@ -15,5 +15,5 @@ func (c *StartCmd) osExecute(log hclog.Logger, args []string) error {
 	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
 	defer cancel()
 
-	return macos.StartVMInForeground(ctx, log, c.StateDir, true)
+	return macos.StartVMInForeground(ctx, log, c.StateDir, c.Attach)
 }

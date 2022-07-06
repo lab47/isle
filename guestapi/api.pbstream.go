@@ -284,8 +284,7 @@ func (PBSUnimplementedHostAPIHandler) TrimMemory(context.Context, *pbstream.Requ
 
 // PBSVMAPIClient is a client for the dev.lab47.isle.guestapi.VMAPI service.
 type PBSVMAPIClient interface {
-	SyncTime(context.Context, *pbstream.Request[SyncTimeReq]) (*pbstream.Response[SyncTimeResp], error)
-	VMInfo(context.Context, *pbstream.Request[VMInfoReq]) (*pbstream.Response[VMInfoResp], error)
+	RequestShutdown(context.Context, *pbstream.Request[Empty]) (*pbstream.Response[Empty], error)
 }
 
 // PBSNewVMAPIClient constructs a client for the dev.lab47.isle.guestapi.VMAPI service. By default,
@@ -297,37 +296,26 @@ type PBSVMAPIClient interface {
 // http://api.acme.com or https://acme.com/grpc).
 func PBSNewVMAPIClient(client pbstream.Client, opts ...pbstream.ClientOption) PBSVMAPIClient {
 	return &pBSVMAPIClient{
-		syncTime: pbstream.NewEndpoint[SyncTimeReq, SyncTimeResp](
+		requestShutdown: pbstream.NewEndpoint[Empty, Empty](
 			client,
-			"/dev.lab47.isle.guestapi.VMAPI/SyncTime",
-		),
-		vMInfo: pbstream.NewEndpoint[VMInfoReq, VMInfoResp](
-			client,
-			"/dev.lab47.isle.guestapi.VMAPI/VMInfo",
+			"/dev.lab47.isle.guestapi.VMAPI/RequestShutdown",
 		),
 	}
 }
 
 // pBSVMAPIClient implements PBSVMAPIClient.
 type pBSVMAPIClient struct {
-	syncTime *pbstream.Endpoint[SyncTimeReq, SyncTimeResp]
-	vMInfo   *pbstream.Endpoint[VMInfoReq, VMInfoResp]
+	requestShutdown *pbstream.Endpoint[Empty, Empty]
 }
 
-// SyncTime calls dev.lab47.isle.guestapi.VMAPI.SyncTime.
-func (c *pBSVMAPIClient) SyncTime(ctx context.Context, req *pbstream.Request[SyncTimeReq]) (*pbstream.Response[SyncTimeResp], error) {
-	return c.syncTime.CallUnary(ctx, req)
-}
-
-// VMInfo calls dev.lab47.isle.guestapi.VMAPI.VMInfo.
-func (c *pBSVMAPIClient) VMInfo(ctx context.Context, req *pbstream.Request[VMInfoReq]) (*pbstream.Response[VMInfoResp], error) {
-	return c.vMInfo.CallUnary(ctx, req)
+// RequestShutdown calls dev.lab47.isle.guestapi.VMAPI.RequestShutdown.
+func (c *pBSVMAPIClient) RequestShutdown(ctx context.Context, req *pbstream.Request[Empty]) (*pbstream.Response[Empty], error) {
+	return c.requestShutdown.CallUnary(ctx, req)
 }
 
 // PBSVMAPIHandler is an implementation of the dev.lab47.isle.guestapi.VMAPI service.
 type PBSVMAPIHandler interface {
-	SyncTime(context.Context, *pbstream.Request[SyncTimeReq]) (*pbstream.Response[SyncTimeResp], error)
-	VMInfo(context.Context, *pbstream.Request[VMInfoReq]) (*pbstream.Response[VMInfoResp], error)
+	RequestShutdown(context.Context, *pbstream.Request[Empty]) (*pbstream.Response[Empty], error)
 }
 
 // PBSNewVMAPIHandler builds an HTTP handler from the service implementation. It returns the path on
@@ -337,13 +325,9 @@ type PBSVMAPIHandler interface {
 // and JSON codecs. They also support gzip compression.
 func PBSNewVMAPIHandler(svc PBSVMAPIHandler, opts ...pbstream.HandlerOption) (string, pbstream.Handler) {
 	mux := pbstream.NewMux()
-	mux.Handle("/dev.lab47.isle.guestapi.VMAPI/SyncTime", pbstream.NewUnaryHandler(
-		"/dev.lab47.isle.guestapi.VMAPI/SyncTime",
-		svc.SyncTime,
-	))
-	mux.Handle("/dev.lab47.isle.guestapi.VMAPI/VMInfo", pbstream.NewUnaryHandler(
-		"/dev.lab47.isle.guestapi.VMAPI/VMInfo",
-		svc.VMInfo,
+	mux.Handle("/dev.lab47.isle.guestapi.VMAPI/RequestShutdown", pbstream.NewUnaryHandler(
+		"/dev.lab47.isle.guestapi.VMAPI/RequestShutdown",
+		svc.RequestShutdown,
 	))
 	return "/dev.lab47.isle.guestapi.VMAPI/", mux
 }
@@ -351,12 +335,8 @@ func PBSNewVMAPIHandler(svc PBSVMAPIHandler, opts ...pbstream.HandlerOption) (st
 // PBSUnimplementedVMAPIHandler returns CodeUnimplemented from all methods.
 type PBSUnimplementedVMAPIHandler struct{}
 
-func (PBSUnimplementedVMAPIHandler) SyncTime(context.Context, *pbstream.Request[SyncTimeReq]) (*pbstream.Response[SyncTimeResp], error) {
-	return nil, pbstream.NewError(pbstream.CodeUnimplemented, errors.New("dev.lab47.isle.guestapi.VMAPI.SyncTime is not implemented"))
-}
-
-func (PBSUnimplementedVMAPIHandler) VMInfo(context.Context, *pbstream.Request[VMInfoReq]) (*pbstream.Response[VMInfoResp], error) {
-	return nil, pbstream.NewError(pbstream.CodeUnimplemented, errors.New("dev.lab47.isle.guestapi.VMAPI.VMInfo is not implemented"))
+func (PBSUnimplementedVMAPIHandler) RequestShutdown(context.Context, *pbstream.Request[Empty]) (*pbstream.Response[Empty], error) {
+	return nil, pbstream.NewError(pbstream.CodeUnimplemented, errors.New("dev.lab47.isle.guestapi.VMAPI.RequestShutdown is not implemented"))
 }
 
 // PBSStartupAPIClient is a client for the dev.lab47.isle.guestapi.StartupAPI service.

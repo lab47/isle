@@ -1,11 +1,14 @@
 package isle
 
 import (
-	_ "github.com/lab47/isle/macos"
+	"github.com/lab47/isle/macos"
 )
 
 func (c *RunCmd) osSetup() error {
 	c.forceSession = true
-	// macos.RunInBackground()
 	return nil
+}
+
+func (c *RunCmd) osStartBackground() error {
+	return macos.RunInBackground(c.stateDir)
 }

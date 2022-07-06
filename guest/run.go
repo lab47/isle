@@ -8,12 +8,23 @@ import (
 	"github.com/samber/do"
 )
 
+type RunEventType int
+
+const (
+	Running RunEventType = iota
+)
+
+type RunEvent struct {
+	Type RunEventType
+}
+
 type RunConfig struct {
 	Logger    hclog.Logger
 	DataDir   string
 	HostBinds map[string]string
 	Listener  net.Listener
 	ClusterId string
+	EventsCh  chan RunEvent
 }
 
 func Run(ctx context.Context, cfg *RunConfig) error {
@@ -57,6 +68,14 @@ func Run(ctx context.Context, cfg *RunConfig) error {
 	go vmapi.Listen(cm, ctx)
 
 	cm.SessionHandler = shl
+
+	if cfg.EventsCh != nil {
+		go func() {
+			cfg.EventsCh <- RunEvent{
+				Type: Running,
+			}
+		}()
+	}
 
 	return cm.Serve(ctx, cfg.Listener)
 }

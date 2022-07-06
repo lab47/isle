@@ -2,6 +2,8 @@ package guest
 
 import (
 	"context"
+	"os"
+	"os/exec"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/guestapi"
@@ -49,10 +51,10 @@ func (a *VMApi) Listen(conMan *ConnectionManager, ctx context.Context) error {
 	}
 }
 
-func (a *VMApi) SyncTime(context.Context, *pbstream.Request[guestapi.SyncTimeReq]) (*pbstream.Response[guestapi.SyncTimeResp], error) {
-	return nil, nil
-}
+func (a *VMApi) RequestShutdown(context.Context, *pbstream.Request[guestapi.Empty]) (*pbstream.Response[guestapi.Empty], error) {
+	cmd := exec.Command("halt")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
 
-func (a *VMApi) VMInfo(context.Context, *pbstream.Request[guestapi.VMInfoReq]) (*pbstream.Response[guestapi.VMInfoResp], error) {
-	return nil, nil
+	return nil, cmd.Run()
 }

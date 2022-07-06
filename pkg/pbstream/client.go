@@ -3,6 +3,7 @@ package pbstream
 import (
 	"context"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/pkg/errors"
@@ -520,7 +521,16 @@ func (ua *serverStreamHandler[Req, Resp]) HandleRPC(ctx context.Context, rs *Str
 
 	ss := &ServerStream[Resp]{rs: rs}
 
-	return ua.fn(ctx, &req, ss)
+	err = ua.fn(ctx, &req, ss)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 func NewBidiStreamHandler[Req, Resp any](
@@ -541,7 +551,16 @@ type bidiStreamHandler[Req, Resp any] struct {
 
 func (ua *bidiStreamHandler[Req, Resp]) HandleRPC(ctx context.Context, rs *Stream) error {
 	bs := &BidiStream[Req, Resp]{rs: rs}
-	return ua.fn(ctx, bs)
+	err := ua.fn(ctx, bs)
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		return err
+	}
+
+	return nil
 }
 
 var ErrInvalidType = errors.New("invalid type of request or response, not proto.Message")
@@ -579,7 +598,12 @@ func (ua *unaryHandler[Req, Resp]) HandleRPC(ctx context.Context, rs *Stream) er
 		return err
 	}
 
-	raw = resp.Value
+	if resp == nil {
+		var empty Resp
+		raw = &empty
+	} else {
+		raw = resp.Value
+	}
 
 	msg = raw.(proto.Message)
 
@@ -616,6 +640,25 @@ type Mux struct {
 	handlers map[string]DispatchHandler
 }
 
+var ErrDispatchError = errors.New("error detected during dispatch")
+
+func (m *Mux) callDispatch(ctx context.Context, h DispatchHandler, rs *Stream) error {
+	var err error
+
+	defer func() {
+		if x := recover(); x != nil {
+			err = errors.Wrapf(ErrDispatchError, "the handler panic: %s", x)
+		}
+	}()
+
+	err = h.HandleRPC(ctx, rs)
+	if err == nil {
+		return nil
+	}
+
+	return err
+}
+
 func (m *Mux) HandleRPC(ctx context.Context, rs *Stream) error {
 	var hdr RPCHeader
 
@@ -625,7 +668,7 @@ func (m *Mux) HandleRPC(ctx context.Context, rs *Stream) error {
 	}
 
 	if handler, ok := m.handlers[hdr.Selector]; ok {
-		err = handler.HandleRPC(ctx, rs)
+		err = m.callDispatch(ctx, handler, rs)
 		if err == nil {
 			return nil
 		}

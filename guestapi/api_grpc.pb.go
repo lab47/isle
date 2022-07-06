@@ -512,8 +512,7 @@ var HostAPI_ServiceDesc = grpc.ServiceDesc{
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
 type VMAPIClient interface {
-	SyncTime(ctx context.Context, in *SyncTimeReq, opts ...grpc.CallOption) (*SyncTimeResp, error)
-	VMInfo(ctx context.Context, in *VMInfoReq, opts ...grpc.CallOption) (*VMInfoResp, error)
+	RequestShutdown(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error)
 }
 
 type vMAPIClient struct {
@@ -524,18 +523,9 @@ func NewVMAPIClient(cc grpc.ClientConnInterface) VMAPIClient {
 	return &vMAPIClient{cc}
 }
 
-func (c *vMAPIClient) SyncTime(ctx context.Context, in *SyncTimeReq, opts ...grpc.CallOption) (*SyncTimeResp, error) {
-	out := new(SyncTimeResp)
-	err := c.cc.Invoke(ctx, "/dev.lab47.isle.guestapi.VMAPI/SyncTime", in, out, opts...)
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
-func (c *vMAPIClient) VMInfo(ctx context.Context, in *VMInfoReq, opts ...grpc.CallOption) (*VMInfoResp, error) {
-	out := new(VMInfoResp)
-	err := c.cc.Invoke(ctx, "/dev.lab47.isle.guestapi.VMAPI/VMInfo", in, out, opts...)
+func (c *vMAPIClient) RequestShutdown(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*Empty, error) {
+	out := new(Empty)
+	err := c.cc.Invoke(ctx, "/dev.lab47.isle.guestapi.VMAPI/RequestShutdown", in, out, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -546,8 +536,7 @@ func (c *vMAPIClient) VMInfo(ctx context.Context, in *VMInfoReq, opts ...grpc.Ca
 // All implementations must embed UnimplementedVMAPIServer
 // for forward compatibility
 type VMAPIServer interface {
-	SyncTime(context.Context, *SyncTimeReq) (*SyncTimeResp, error)
-	VMInfo(context.Context, *VMInfoReq) (*VMInfoResp, error)
+	RequestShutdown(context.Context, *Empty) (*Empty, error)
 	mustEmbedUnimplementedVMAPIServer()
 }
 
@@ -555,11 +544,8 @@ type VMAPIServer interface {
 type UnimplementedVMAPIServer struct {
 }
 
-func (UnimplementedVMAPIServer) SyncTime(context.Context, *SyncTimeReq) (*SyncTimeResp, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method SyncTime not implemented")
-}
-func (UnimplementedVMAPIServer) VMInfo(context.Context, *VMInfoReq) (*VMInfoResp, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method VMInfo not implemented")
+func (UnimplementedVMAPIServer) RequestShutdown(context.Context, *Empty) (*Empty, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RequestShutdown not implemented")
 }
 func (UnimplementedVMAPIServer) mustEmbedUnimplementedVMAPIServer() {}
 
@@ -574,38 +560,20 @@ func RegisterVMAPIServer(s grpc.ServiceRegistrar, srv VMAPIServer) {
 	s.RegisterService(&VMAPI_ServiceDesc, srv)
 }
 
-func _VMAPI_SyncTime_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(SyncTimeReq)
+func _VMAPI_RequestShutdown_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(VMAPIServer).SyncTime(ctx, in)
+		return srv.(VMAPIServer).RequestShutdown(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: "/dev.lab47.isle.guestapi.VMAPI/SyncTime",
+		FullMethod: "/dev.lab47.isle.guestapi.VMAPI/RequestShutdown",
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(VMAPIServer).SyncTime(ctx, req.(*SyncTimeReq))
-	}
-	return interceptor(ctx, in, info, handler)
-}
-
-func _VMAPI_VMInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(VMInfoReq)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(VMAPIServer).VMInfo(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: "/dev.lab47.isle.guestapi.VMAPI/VMInfo",
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(VMAPIServer).VMInfo(ctx, req.(*VMInfoReq))
+		return srv.(VMAPIServer).RequestShutdown(ctx, req.(*Empty))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -618,12 +586,8 @@ var VMAPI_ServiceDesc = grpc.ServiceDesc{
 	HandlerType: (*VMAPIServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
-			MethodName: "SyncTime",
-			Handler:    _VMAPI_SyncTime_Handler,
-		},
-		{
-			MethodName: "VMInfo",
-			Handler:    _VMAPI_VMInfo_Handler,
+			MethodName: "RequestShutdown",
+			Handler:    _VMAPI_RequestShutdown_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
