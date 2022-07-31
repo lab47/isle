@@ -29,6 +29,7 @@ type PBSResourceAPIClient interface {
 	Read(context.Context, *pbstream.Request[ReadResourceReq]) (*pbstream.Response[ReadResourceResp], error)
 	CheckProvision(context.Context, *pbstream.Request[CheckProvisionReq]) (*pbstream.Response[CheckProvisionResp], error)
 	Delete(context.Context, *pbstream.Request[DeleteResourceReq]) (*pbstream.Response[DeleteResourceResp], error)
+	List(context.Context, *pbstream.Request[ListResourcesReq]) (*pbstream.Response[ListResourcesResp], error)
 }
 
 // PBSNewResourceAPIClient constructs a client for the dev.lab47.isle.guestapi.ResourceAPI service.
@@ -60,6 +61,10 @@ func PBSNewResourceAPIClient(client pbstream.Client, opts ...pbstream.ClientOpti
 			client,
 			"/dev.lab47.isle.guestapi.ResourceAPI/Delete",
 		),
+		list: pbstream.NewEndpoint[ListResourcesReq, ListResourcesResp](
+			client,
+			"/dev.lab47.isle.guestapi.ResourceAPI/List",
+		),
 	}
 }
 
@@ -70,6 +75,7 @@ type pBSResourceAPIClient struct {
 	read           *pbstream.Endpoint[ReadResourceReq, ReadResourceResp]
 	checkProvision *pbstream.Endpoint[CheckProvisionReq, CheckProvisionResp]
 	delete         *pbstream.Endpoint[DeleteResourceReq, DeleteResourceResp]
+	list           *pbstream.Endpoint[ListResourcesReq, ListResourcesResp]
 }
 
 // Create calls dev.lab47.isle.guestapi.ResourceAPI.Create.
@@ -97,6 +103,11 @@ func (c *pBSResourceAPIClient) Delete(ctx context.Context, req *pbstream.Request
 	return c.delete.CallUnary(ctx, req)
 }
 
+// List calls dev.lab47.isle.guestapi.ResourceAPI.List.
+func (c *pBSResourceAPIClient) List(ctx context.Context, req *pbstream.Request[ListResourcesReq]) (*pbstream.Response[ListResourcesResp], error) {
+	return c.list.CallUnary(ctx, req)
+}
+
 // PBSResourceAPIHandler is an implementation of the dev.lab47.isle.guestapi.ResourceAPI service.
 type PBSResourceAPIHandler interface {
 	Create(context.Context, *pbstream.Request[CreateResourceReq]) (*pbstream.Response[CreateResourceResp], error)
@@ -104,6 +115,7 @@ type PBSResourceAPIHandler interface {
 	Read(context.Context, *pbstream.Request[ReadResourceReq]) (*pbstream.Response[ReadResourceResp], error)
 	CheckProvision(context.Context, *pbstream.Request[CheckProvisionReq]) (*pbstream.Response[CheckProvisionResp], error)
 	Delete(context.Context, *pbstream.Request[DeleteResourceReq]) (*pbstream.Response[DeleteResourceResp], error)
+	List(context.Context, *pbstream.Request[ListResourcesReq]) (*pbstream.Response[ListResourcesResp], error)
 }
 
 // PBSNewResourceAPIHandler builds an HTTP handler from the service implementation. It returns the
@@ -133,6 +145,10 @@ func PBSNewResourceAPIHandler(svc PBSResourceAPIHandler, opts ...pbstream.Handle
 		"/dev.lab47.isle.guestapi.ResourceAPI/Delete",
 		svc.Delete,
 	))
+	mux.Handle("/dev.lab47.isle.guestapi.ResourceAPI/List", pbstream.NewUnaryHandler(
+		"/dev.lab47.isle.guestapi.ResourceAPI/List",
+		svc.List,
+	))
 	return "/dev.lab47.isle.guestapi.ResourceAPI/", mux
 }
 
@@ -157,4 +173,8 @@ func (PBSUnimplementedResourceAPIHandler) CheckProvision(context.Context, *pbstr
 
 func (PBSUnimplementedResourceAPIHandler) Delete(context.Context, *pbstream.Request[DeleteResourceReq]) (*pbstream.Response[DeleteResourceResp], error) {
 	return nil, pbstream.NewError(pbstream.CodeUnimplemented, errors.New("dev.lab47.isle.guestapi.ResourceAPI.Delete is not implemented"))
+}
+
+func (PBSUnimplementedResourceAPIHandler) List(context.Context, *pbstream.Request[ListResourcesReq]) (*pbstream.Response[ListResourcesResp], error) {
+	return nil, pbstream.NewError(pbstream.CodeUnimplemented, errors.New("dev.lab47.isle.guestapi.ResourceAPI.List is not implemented"))
 }

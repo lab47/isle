@@ -6,6 +6,8 @@ option go_package = "lab47.dev/isle/guestapi";
 
 import "containers.proto";
 import "labels.proto";
+import "resources.proto";
+import "api.proto";
 
 message ShellSession {
   string name = 1;
@@ -80,3 +82,26 @@ message Packet {
     int32 code = 1;
   }
 }
+
+message ShellSessionResource {
+  ResourceId id = 1;
+  ShellSession session = 2;
+  ProvisionStatus provision_status = 3;
+}
+
+message ListShellSessionsResp {
+  repeated ShellSessionResource sessions = 1;
+}
+
+message RemoveShellSessionReq {
+  ResourceId id = 1;
+  string name = 2;
+}
+
+message RemoveShellSessionResp {}
+
+service ShellAPI {
+  rpc ListShellSessions(Empty) returns (ListShellSessionsResp);
+  rpc RemoveShellSession(RemoveShellSessionReq) returns (RemoveShellSessionResp);
+}
+

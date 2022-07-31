@@ -273,6 +273,17 @@ func (c *Connection) StartSession(ctx context.Context, info *SessionInfo, status
 	return handleSession(ctx, rs, status, useTerm)
 }
 
+func (c *Connection) Open(sel labels.Set) (*pbstream.Stream, net.Conn, error) {
+	return c.hc.Open(sel)
+}
+
+func (c *Connection) Opener(sel labels.Set) pbstream.StreamOpener {
+	return pbstream.StreamOpenFunc(func() (*pbstream.Stream, error) {
+		rs, _, err := c.hc.Open(sel)
+		return rs, err
+	})
+}
+
 type Single struct {
 	rwc io.ReadWriteCloser
 	log hclog.Logger

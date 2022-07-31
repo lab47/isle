@@ -270,6 +270,8 @@ func StartSession(log hclog.Logger, rwc io.ReadWriteCloser, sess *guestapi.Sessi
 }
 
 func (c *Connection) Open(sel labels.Set) (*pbstream.Stream, net.Conn, error) {
+	c.log.Trace("opening new connection", "selector", sel.String())
+
 	conn, err := c.sess.OpenStream()
 	if err != nil {
 		return nil, nil, err

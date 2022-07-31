@@ -27,6 +27,7 @@ type ResourceAPIClient interface {
 	Read(ctx context.Context, in *ReadResourceReq, opts ...grpc.CallOption) (*ReadResourceResp, error)
 	CheckProvision(ctx context.Context, in *CheckProvisionReq, opts ...grpc.CallOption) (*CheckProvisionResp, error)
 	Delete(ctx context.Context, in *DeleteResourceReq, opts ...grpc.CallOption) (*DeleteResourceResp, error)
+	List(ctx context.Context, in *ListResourcesReq, opts ...grpc.CallOption) (*ListResourcesResp, error)
 }
 
 type resourceAPIClient struct {
@@ -82,6 +83,15 @@ func (c *resourceAPIClient) Delete(ctx context.Context, in *DeleteResourceReq, o
 	return out, nil
 }
 
+func (c *resourceAPIClient) List(ctx context.Context, in *ListResourcesReq, opts ...grpc.CallOption) (*ListResourcesResp, error) {
+	out := new(ListResourcesResp)
+	err := c.cc.Invoke(ctx, "/dev.lab47.isle.guestapi.ResourceAPI/List", in, out, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ResourceAPIServer is the server API for ResourceAPI service.
 // All implementations must embed UnimplementedResourceAPIServer
 // for forward compatibility
@@ -91,6 +101,7 @@ type ResourceAPIServer interface {
 	Read(context.Context, *ReadResourceReq) (*ReadResourceResp, error)
 	CheckProvision(context.Context, *CheckProvisionReq) (*CheckProvisionResp, error)
 	Delete(context.Context, *DeleteResourceReq) (*DeleteResourceResp, error)
+	List(context.Context, *ListResourcesReq) (*ListResourcesResp, error)
 	mustEmbedUnimplementedResourceAPIServer()
 }
 
@@ -112,6 +123,9 @@ func (UnimplementedResourceAPIServer) CheckProvision(context.Context, *CheckProv
 }
 func (UnimplementedResourceAPIServer) Delete(context.Context, *DeleteResourceReq) (*DeleteResourceResp, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method Delete not implemented")
+}
+func (UnimplementedResourceAPIServer) List(context.Context, *ListResourcesReq) (*ListResourcesResp, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method List not implemented")
 }
 func (UnimplementedResourceAPIServer) mustEmbedUnimplementedResourceAPIServer() {}
 
@@ -216,6 +230,24 @@ func _ResourceAPI_Delete_Handler(srv interface{}, ctx context.Context, dec func(
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ResourceAPI_List_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListResourcesReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ResourceAPIServer).List(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: "/dev.lab47.isle.guestapi.ResourceAPI/List",
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ResourceAPIServer).List(ctx, req.(*ListResourcesReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ResourceAPI_ServiceDesc is the grpc.ServiceDesc for ResourceAPI service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -242,6 +274,10 @@ var ResourceAPI_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Delete",
 			Handler:    _ResourceAPI_Delete_Handler,
+		},
+		{
+			MethodName: "List",
+			Handler:    _ResourceAPI_List_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

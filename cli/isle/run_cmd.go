@@ -19,6 +19,7 @@ type RunCmd struct {
 	Image    string `short:"i" long:"image" default:"ubuntu" description:"OCI image to run"`
 	Name     string `short:"n" long:"name" default:"default" description:"name of instance to run in"`
 	StateDir string `long:"state-dir" env:"ISLE_STATE_DIR" description:"directory runtime data is in"`
+	Connect  string `long:"connect" description:"socket to connect to"`
 	Verbose  []bool `short:"V" description:"be more verbose"`
 
 	stateDir     string
@@ -69,20 +70,9 @@ func (c *RunCmd) Execute(args []string) error {
 		status = bannerStatus{}
 	}
 
-	level := hclog.Info
-
-	switch len(c.Verbose) {
-	case 0:
-		// nothing
-	case 1:
-		level = hclog.Debug
-	default:
-		level = hclog.Trace
-	}
-
 	log := hclog.New(&hclog.LoggerOptions{
 		Name:  "isle",
-		Level: level,
+		Level: ComputeLevel(c.Verbose),
 	})
 
 	dir, err := ComputeStateDir(c.StateDir)
@@ -99,6 +89,7 @@ func (c *RunCmd) Execute(args []string) error {
 
 	if !c.probeBackend() {
 		log.Info("automatically starting backend")
+		updateBanner("Starting backend...")
 		err = c.osStartBackground()
 		if err != nil {
 			return err
@@ -133,9 +124,15 @@ func (c *RunCmd) Execute(args []string) error {
 		if err != nil {
 			return err
 		}
-
 	} else {
-		conn, err := connector.Connect("unix", filepath.Join(c.stateDir, "isle.sock"))
+		var conn *client.Connection
+
+		if c.Connect != "" {
+			conn, err = connector.Connect("unix", c.Connect)
+		} else {
+			conn, err = connector.Connect("unix", filepath.Join(c.stateDir, "isle.sock"))
+		}
+
 		if err != nil {
 			return err
 		}
@@ -153,10 +150,57 @@ func (c *RunCmd) Execute(args []string) error {
 		if err != nil {
 			return err
 		}
-
 	}
 
 	return nil
+}
+
+func (c *RunCmd) OpenViaSession(log hclog.Logger, addr string, connector *client.Connector) (*client.Connection, error) {
+	conn, err := net.DialUnix("unix", nil, &net.UnixAddr{Name: addr, Net: "unix"})
+	if err != nil {
+		log.Error("error connecting to multiplexer")
+		return nil, err
+	}
+
+	log.Trace("connect to multiplexer", "addr", addr)
+
+	connRaw, err := conn.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+
+	var f *os.File
+
+	connRaw.Read(func(fd uintptr) bool {
+		// receive socket control message
+		b := make([]byte, unix.CmsgSpace(4))
+		_, _, _, _, err = unix.Recvmsg(int(fd), nil, b, 0)
+		if err != nil {
+			return false
+		}
+
+		// parse socket control message
+		cmsgs, err := unix.ParseSocketControlMessage(b)
+		if err != nil {
+			panic(err)
+		}
+		fds, err := unix.ParseUnixRights(&cmsgs[0])
+		if err != nil {
+			panic(err)
+		}
+
+		remoteFd := fds[0]
+
+		f = os.NewFile(uintptr(remoteFd), "listener")
+
+		return true
+	})
+
+	if f == nil {
+		panic("couldn't get a descriptor")
+	}
+
+	return connector.ConnectIO(f)
 }
 
 func (c *RunCmd) UseSession(log hclog.Logger, addr string, connector *client.Connector) (*client.Single, error) {

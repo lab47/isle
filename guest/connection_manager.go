@@ -85,14 +85,20 @@ func (c *ConnectionManager) Serve(ctx context.Context, l net.Listener) error {
 			return nil
 		}
 
+		c.L.Trace("accepting new connection to connection manager")
+
 		go func() {
 			var hdr pbstream.ConnectionHeader
+
+			c.L.Trace("reading session header")
 
 			err = pbstream.ReadOne(conn, &hdr)
 			if err != nil {
 				c.L.Error("error reading connection header", "error", err)
 				return
 			}
+
+			c.L.Trace("session header", "multiplex", hdr.Multiplex)
 
 			if hdr.Multiplex {
 				session, err := yamux.Server(conn, cfg)
@@ -220,6 +226,8 @@ func (c *ConnectionManager) handOffConnect(ctx context.Context, pbsel *guestapi.
 		c.L.Error("unable to find listener for connect", "selector", sel.String())
 		return errors.Wrapf(ErrRouting, "no connections for selector: %s", sel.String())
 	}
+
+	c.L.Trace("sending stream ack")
 
 	var ack guestapi.StreamAck
 	ack.Response = &guestapi.StreamAck_Ok{
