@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"context"
 	"io"
 	"net"
 	"os"
@@ -8,10 +9,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/davecgh/go-spew/spew"
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/pkg/labels"
+	"github.com/lab47/isle/pkg/pbstream"
 	"github.com/pkg/errors"
 	"github.com/samber/do"
 )
@@ -32,6 +33,8 @@ type ShellManager struct {
 	dataDir string
 
 	hostBinds map[string]string
+
+	topCtx *ResourceContext
 }
 
 func NewShellManager(inj *do.Injector) (*ShellManager, error) {
@@ -60,6 +63,16 @@ func NewShellManager(inj *do.Injector) (*ShellManager, error) {
 		return nil, err
 	}
 
+	rctx, err := do.Invoke[*ResourceContext](inj)
+	if err != nil {
+		return nil, err
+	}
+
+	topCtx, err := do.InvokeNamed[context.Context](inj, "top")
+	if err != nil {
+		return nil, err
+	}
+
 	// we allow it to not be set.
 	hostBinds, _ := do.InvokeNamed[map[string]string](inj, "host-binds")
 
@@ -82,6 +95,8 @@ func NewShellManager(inj *do.Injector) (*ShellManager, error) {
 
 		dataDir:   shellDataDir,
 		hostBinds: hostBinds,
+
+		topCtx: rctx,
 	}
 
 	err = sm.Init(ctx)
@@ -89,7 +104,100 @@ func NewShellManager(inj *do.Injector) (*ShellManager, error) {
 		return nil, err
 	}
 
+	_, handler := guestapi.PBSNewShellAPIHandler(sm)
+
+	listener := conMan.Listen(labels.New("component", "shell"))
+
+	go func() {
+		for {
+			rs, _, err := listener.Accept(topCtx)
+			if err != nil {
+				return
+			}
+
+			go func() {
+				err = handler.HandleRPC(ctx, rs)
+				if err != nil {
+					log.Error("error handling rpc", "error", err)
+				}
+			}()
+
+		}
+	}()
+
 	return sm, nil
+}
+
+func (m *ShellManager) ListShellSessions(
+	ctx context.Context, req *pbstream.Request[guestapi.Empty],
+) (*pbstream.Response[guestapi.ListShellSessionsResp], error) {
+	rctx := m.topCtx.Under(ctx)
+
+	resources, err := rctx.List("shell", "session")
+	if err != nil {
+		return nil, err
+	}
+
+	var resp guestapi.ListShellSessionsResp
+
+	for _, res := range resources {
+		raw, err := res.Resource.UnmarshalNew()
+		if err != nil {
+			return nil, err
+		}
+
+		sess, ok := raw.(*guestapi.ShellSession)
+		if !ok {
+			return nil, errors.Wrapf(ErrInvalidResource, "not a shell session")
+		}
+
+		resp.Sessions = append(resp.Sessions, &guestapi.ShellSessionResource{
+			Id:              res.Id,
+			Session:         sess,
+			ProvisionStatus: res.ProvisionStatus,
+		})
+	}
+
+	return pbstream.NewResponse(&resp), nil
+}
+
+func (m *ShellManager) Unwrap(res *guestapi.Resource) (*guestapi.ShellSession, error) {
+	raw, err := res.Resource.UnmarshalNew()
+	if err != nil {
+		return nil, err
+	}
+
+	sess, ok := raw.(*guestapi.ShellSession)
+	if !ok {
+		return nil, errors.Wrapf(ErrInvalidResource, "not a shell session")
+	}
+
+	return sess, nil
+}
+
+func (m *ShellManager) RemoveShellSession(
+	ctx context.Context, req *pbstream.Request[guestapi.RemoveShellSessionReq],
+) (*pbstream.Response[guestapi.RemoveShellSessionResp], error) {
+	rctx := m.topCtx.Under(ctx)
+
+	res, err := m.Lookup(rctx, req.Value.Name)
+	if err != nil {
+		return nil, err
+	}
+
+	shell, err := m.Unwrap(res)
+	if err != nil {
+		return nil, err
+	}
+
+	err = m.Delete(m.topCtx.Under(ctx), res, shell)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp guestapi.RemoveShellSessionResp
+
+	return pbstream.NewResponse(&resp), nil
 }
 
 func (m *ShellManager) Init(ctx *ResourceContext) error {
@@ -164,8 +272,6 @@ func (m *ShellManager) Create(ctx *ResourceContext, sess *guestapi.ShellSession)
 		})
 	}
 
-	spew.Dump(cont.Binds)
-
 	res, err := m.Containers.Create(ctx, cont)
 	if err != nil {
 		return nil, err
@@ -182,6 +288,55 @@ func (m *ShellManager) Create(ctx *ResourceContext, sess *guestapi.ShellSession)
 	go m.startSSHAgent(hostSSHPath, sess.User)
 
 	return shellRes, nil
+}
+
+func (m *ShellManager) Update(ctx *ResourceContext, res *guestapi.Resource) (*guestapi.Resource, error) {
+	return nil, ErrImmutable
+}
+
+func (m *ShellManager) Read(ctx *ResourceContext, id *guestapi.ResourceId) (*guestapi.Resource, error) {
+	res, err := ctx.Fetch(id)
+	if err != nil {
+		return nil, err
+	}
+
+	m.L.Debug("reading shell session", "id", id.Short(), "status", res.ProvisionStatus.Status.String())
+
+	return res, nil
+}
+
+func (m *ShellManager) Delete(ctx *ResourceContext, res *guestapi.Resource, sess *guestapi.ShellSession) error {
+	res.ProvisionStatus.Status = guestapi.ProvisionStatus_DEAD
+	err := ctx.UpdateProvision(ctx, res.Id, res.ProvisionStatus)
+	if err != nil {
+		return err
+	}
+
+	contId := res.ProvisionStatus.ContainerRef
+
+	var cont *guestapi.Container
+
+	contRes, err := m.Containers.Read(ctx, contId)
+	if err != nil {
+		m.L.Warn("container resource is missing")
+	} else {
+		cont, err = m.Containers.Unwrap(contRes)
+		if err != nil {
+			m.L.Warn("container resource is corrupted")
+		}
+	}
+
+	if cont != nil {
+		err = m.Containers.Delete(ctx, contRes, cont)
+		if err != nil {
+			m.L.Warn("error deleting container resource", "error", err)
+		} else {
+			m.L.Info("deleted container due to shell deletion", "id", contRes.Id.Short())
+		}
+	}
+
+	_, err = ctx.Delete(ctx, res.Id)
+	return err
 }
 
 func (m *ShellManager) restartSessions(ctx *ResourceContext) error {
@@ -201,15 +356,11 @@ func (m *ShellManager) restartSessions(ctx *ResourceContext) error {
 			return errors.Wrapf(ErrInvalidResource, "not a shell session")
 		}
 
-		switch res.ProvisionStatus.Status {
-		case guestapi.ProvisionStatus_RUNNING, guestapi.ProvisionStatus_STOPPED:
-			err = m.restartSession(ctx, res, sess)
-			if err != nil {
-				return err
-			}
-		default:
-			m.L.Info("prune old shell session", "id", res.Id.Short())
-			ctx.Delete(ctx, res.Id)
+		m.L.Info("attempting to restart shell session", "container", res.Id.Short())
+
+		err = m.restartSession(ctx, res, sess)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -357,4 +508,11 @@ func (m *ShellManager) startSSHAgent(path string, user *guestapi.User) {
 			io.Copy(local, remote)
 		}()
 	}
+}
+
+func init() {
+	DefaultRegistry.Register(
+		&guestapi.Container{},
+		TypedManager[*guestapi.ShellSession](&ShellManager{}),
+	)
 }

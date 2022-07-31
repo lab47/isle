@@ -658,6 +658,46 @@ func (r *ResourceStorage) SetError(ctx context.Context, id *guestapi.ResourceId,
 	return nil
 }
 
+func (r *ResourceStorage) ListIds(category, typ string) ([]*guestapi.ResourceId, error) {
+	id := &guestapi.ResourceId{
+		Category: category,
+		Type:     typ,
+	}
+
+	var result []*guestapi.ResourceId
+
+	err := r.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket(resBucket)
+		idkey := r.idToBytes(id)
+
+		cur := bucket.Cursor()
+
+		key, _ := cur.Seek(idkey)
+
+		for len(key) != 0 {
+			pkey, err := r.idFromBytes(key)
+			if err != nil {
+				return errors.Wrapf(err, "attempting to unmarshal resource key")
+			}
+
+			if pkey.Category != category || pkey.Type != typ {
+				break
+			}
+
+			result = append(result, pkey)
+
+			key, _ = cur.Next()
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return result, nil
+}
+
 func (r *ResourceStorage) List(category, typ string) ([]*guestapi.Resource, error) {
 	id := &guestapi.ResourceId{
 		Category: category,

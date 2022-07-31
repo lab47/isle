@@ -151,9 +151,6 @@ func (sl *ShellLauncher) StartSession(ctx *ResourceContext, rs *pbstream.Stream,
 				case guestapi.ProvisionStatus_ADDING:
 					// ok
 				case guestapi.ProvisionStatus_DEAD:
-					// Delete the session because it didn't start
-					ctx.Delete(ctx, res.Id)
-
 					lerr := change.Status.LastError
 
 					if lerr == "" {

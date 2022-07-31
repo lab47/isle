@@ -117,3 +117,4 @@ message CurrentTime {
 service StartupAPI  {
   rpc VMRunning(RunningReq) returns (RunningResp) {}
 }
+

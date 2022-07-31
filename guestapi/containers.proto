@@ -21,6 +21,8 @@ message Bind {
 
 message Container {
   string image = 1;
+  string rootfs = 11;
+
   repeated string setup_command = 2;
   map<string, string> setup_environment = 3;
   Labels port_forward = 4;

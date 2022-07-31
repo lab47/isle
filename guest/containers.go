@@ -169,6 +169,11 @@ func NewContainerManager(inj *do.Injector) (*ContainerManager, error) {
 		return nil, err
 	}
 
+	helperPath, _ := do.InvokeNamed[string](inj, "helper-path")
+	if helperPath == "" {
+		helperPath = DefaultHelperPath
+	}
+
 	err = cm.Init(rctx, &ContainerConfig{
 		Logger:   log,
 		BaseDir:  filepath.Join(dataDir, "containers"),
@@ -179,7 +184,7 @@ func NewContainerManager(inj *do.Injector) (*ContainerManager, error) {
 
 		BridgeID: 0,
 
-		HelperPath:     "/usr/bin/isle-helper",
+		HelperPath:     helperPath,
 		NetworkManager: ipm,
 	})
 	if err != nil {
@@ -262,61 +267,56 @@ func (m *ContainerManager) restartContainers(ctx *ResourceContext) error {
 	}
 
 	for _, res := range resources {
-		raw, err := res.Resource.UnmarshalNew()
+		cont, err := m.Unwrap(res)
 		if err != nil {
 			return err
 		}
 
-		status := res.ProvisionStatus.Status
+		m.L.Info("attempting to restart container", "container", res.Id.Short())
 
-		switch status {
-		case guestapi.ProvisionStatus_RUNNING, guestapi.ProvisionStatus_STOPPED:
-			cont, ok := raw.(*guestapi.Container)
-			if !ok {
-				return errors.Wrapf(ErrInvalidResource, "container type not a container")
-			}
+		err = ctx.UpdateProvision(ctx, res.Id, &guestapi.ProvisionStatus{
+			Status: guestapi.ProvisionStatus_ADDING,
+		})
+		if err != nil {
+			return err
+		}
 
-			err = ctx.UpdateProvision(ctx, res.Id, &guestapi.ProvisionStatus{
-				Status: guestapi.ProvisionStatus_ADDING,
-			})
-			if err != nil {
-				return err
-			}
-
-			err = m.restartContainer(ctx, res, cont, sel)
-			if err != nil {
-				return err
-			}
-		default:
-			m.L.Info("deleting old container", "id", res.Id.Short(), "status", status.String())
-			ctx.Delete(ctx, res.Id)
+		err = m.restartContainer(ctx, res, cont, sel)
+		if err != nil {
+			return err
 		}
 	}
 
 	return nil
 }
 
-func (m *ContainerManager) waitOnContainer(ctx *ResourceContext, ch chan ProvisionChange) error {
+func (m *ContainerManager) waitOnContainer(ctx *ResourceContext, start bool, ch chan ProvisionChange) (*guestapi.ProvisionStatus, error) {
 loop:
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case provCha := <-ch:
 			status := provCha.Status
+
+			m.L.Trace("container status", "status", status.Status.String())
 
 			switch status.Status {
 			case guestapi.ProvisionStatus_ADDING:
 				// ok, keep waiting
-			case guestapi.ProvisionStatus_DEAD, guestapi.ProvisionStatus_SUSPENDED:
-				return errors.Wrapf(ErrInvalidResource, "container died rather than start")
+			case guestapi.ProvisionStatus_DEAD, guestapi.ProvisionStatus_SUSPENDED, guestapi.ProvisionStatus_STOPPED:
+				return status, errors.Wrapf(ErrInvalidResource, "container died rather than start")
 			case guestapi.ProvisionStatus_RUNNING:
+				if start {
+					return status, nil
+				}
+			default:
 				break loop
 			}
 		}
 	}
 
-	return nil
+	return nil, nil
 }
 
 func (m *ContainerManager) restartContainer(
@@ -375,7 +375,8 @@ func (m *ContainerManager) restartContainer(
 		}
 	}()
 
-	return m.waitOnContainer(ctx, ch)
+	_, err = m.waitOnContainer(ctx, true, ch)
+	return err
 }
 
 func (m *ContainerManager) Create(ctx *ResourceContext, cont *guestapi.Container) (*guestapi.Resource, error) {
@@ -441,7 +442,7 @@ func (m *ContainerManager) Create(ctx *ResourceContext, cont *guestapi.Container
 					Status: guestapi.ProvisionStatus_STOPPED,
 				})
 			} else {
-				m.L.Error("error creating container", "error", err, "id", id.UniqueId)
+				m.L.Error("error creating container", "error", err, "id", id.Short())
 				err = ctx.SetError(ctx, id, err)
 				if err != nil {
 					m.L.Error("error recording error on container", "error", err, "id", id.UniqueId)
@@ -469,37 +470,79 @@ func (m *ContainerManager) Read(ctx *ResourceContext, id *guestapi.ResourceId) (
 
 	m.L.Debug("reading container", "id", id.Short(), "status", res.ProvisionStatus.Status.String())
 
+	sig := ctx.ProvisionChangeSelector()
+
+	ch := sig.Register(id.Short())
+	defer sig.Unregister(ch)
+
+	// Block until the container is not in some final state
+	if res.ProvisionStatus.Status == guestapi.ProvisionStatus_ADDING {
+	loop:
+		for {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case change := <-ch:
+				m.L.Debug("container provision status change", "status", change.Status.Status)
+
+				switch change.Status.Status {
+				case guestapi.ProvisionStatus_ADDING:
+					// ok
+				default:
+					break loop
+				}
+			}
+		}
+	}
+
 	return res, nil
 }
 
-func (m *ContainerManager) Delete(ctx *ResourceContext, res *guestapi.Resource, cont *guestapi.Container) error {
-	res.ProvisionStatus.Status = guestapi.ProvisionStatus_DEAD
-	err := ctx.UpdateProvision(ctx, res.Id, res.ProvisionStatus)
+func (m *ContainerManager) Unwrap(res *guestapi.Resource) (*guestapi.Container, error) {
+	raw, err := res.Resource.UnmarshalNew()
 	if err != nil {
-		return err
+		return nil, err
 	}
 
+	cont, ok := raw.(*guestapi.Container)
+	if !ok {
+		return nil, errors.Wrapf(ErrInvalidResource, "container type not a container")
+	}
+
+	return cont, nil
+}
+
+func (m *ContainerManager) Delete(ctx *ResourceContext, res *guestapi.Resource, cont *guestapi.Container) error {
 	m.runningMu.Lock()
 	cancel, isRunning := m.running[res.Id.Short()]
 	m.runningMu.Unlock()
 
+	var status *guestapi.ProvisionStatus
+
 	if !isRunning {
-		m.L.Warn("deleting container that is not running", "id", res.Id.UniqueId)
-
-		_, err = ctx.Delete(ctx, res.Id)
+		res.ProvisionStatus.Status = guestapi.ProvisionStatus_DEAD
+		err := ctx.UpdateProvision(ctx, res.Id, res.ProvisionStatus)
 		if err != nil {
-			m.L.Error("error deleting resource from store", "error", err)
+			return err
 		}
+		status = res.ProvisionStatus
+	} else {
+		sig := ctx.ProvisionChangeSelector()
 
-		return nil
+		ch := sig.Register(res.Id.Short())
+		defer sig.Unregister(ch)
+
+		// We cancel it and let the monitoring goroutine perform the
+		// cleanup.
+		m.L.Debug("canceling context of running monitor to delete container")
+		cancel()
+
+		status, _ = m.waitOnContainer(ctx, false, ch)
 	}
 
-	// We cancel it and let the monitoring goroutine perform the
-	// cleanup.
-	m.L.Debug("canceling context of running monitor to delete container")
-	cancel()
+	m.L.Info("purging container from disk", "id", res.Id.Short(), "status", status.Status.String())
 
-	return nil
+	return m.purge(ctx, res, cont)
 }
 
 func init() {
@@ -711,6 +754,32 @@ func (m *ContainerManager) unpackOCI(
 	}
 
 	return &cfg.Config, nil
+}
+
+func (m *ContainerManager) purge(
+	ctx *ResourceContext, res *guestapi.Resource, cont *guestapi.Container,
+) error {
+	ctx.Delete(ctx, res.Id)
+
+	id := res.Id.Short()
+
+	stableId := cont.StableId
+	if stableId == "" {
+		stableId = id
+	}
+
+	r := runc.Runc{
+		Root:  m.cfg.RuncRoot,
+		Debug: true,
+	}
+
+	r.Delete(ctx, id, &runc.DeleteOpts{
+		Force: true,
+	})
+
+	bundlePath := filepath.Join(m.cfg.BaseDir, stableId)
+
+	return os.RemoveAll(bundlePath)
 }
 
 const DefaultHome = "/vol/user/home"
@@ -1337,22 +1406,22 @@ loop:
 	}
 	removedCNI = true
 
-	m.L.Warn("setting container as stopped")
-
-	err = ctx.UpdateProvision(ctx, rid, &guestapi.ProvisionStatus{
-		Status: guestapi.ProvisionStatus_STOPPED,
-	})
-
-	if err != nil {
-		m.L.Error("error updating provisioning", "error", err, "id", rid.String())
-	}
-
 	err = r.Delete(finCtx, id, &runc.DeleteOpts{
 		Force: true,
 	})
 
 	if err != nil {
 		m.L.Error("error removing container", "error", err)
+	}
+
+	m.L.Warn("setting container as stopped")
+
+	err = ctx.UpdateProvision(ctx.Under(finCtx), rid, &guestapi.ProvisionStatus{
+		Status: guestapi.ProvisionStatus_STOPPED,
+	})
+
+	if err != nil {
+		m.L.Error("error updating provisioning", "error", err, "id", rid.String())
 	}
 
 	return orig

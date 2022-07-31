@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"time"
 
@@ -130,21 +129,6 @@ func StartVMInForeground(ctx context.Context, log hclog.Logger, dir string, atta
 const (
 	EnvStateDir = "ISLE_STATE_DIR"
 )
-
-func BackgroundExec() {
-	log := hclog.New(&hclog.LoggerOptions{
-		Name: "isle-host",
-	})
-
-	dir := os.Getenv(EnvStateDir)
-
-	ctx := context.Background()
-
-	ctx, cancel := signal.NotifyContext(ctx, os.Interrupt)
-	defer cancel()
-
-	StartVMInForeground(ctx, log, dir, false)
-}
 
 func RunInBackground(dir string) error {
 	execPath, err := os.Executable()

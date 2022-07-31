@@ -54,6 +54,8 @@ func (s Set) Match(os Set) bool {
 	sp := s.pairs
 	op := os.pairs
 
+	// sp can have more pairs than op, but everything in op must be in sp
+
 	for len(op) > 0 {
 		switch {
 		case len(sp) == 0:
@@ -63,8 +65,8 @@ func (s Set) Match(os Set) bool {
 			sp = sp[1:]
 		case op[0].Key < sp[0].Key:
 			return false
-		case op[0].Key > sp[0].Key:
-			return false
+		default:
+			sp = sp[1:]
 		}
 	}
 

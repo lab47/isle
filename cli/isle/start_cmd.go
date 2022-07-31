@@ -16,20 +16,9 @@ type StartCmd struct {
 }
 
 func (s *StartCmd) Execute(args []string) error {
-	level := hclog.Info
-
-	switch len(s.Verbose) {
-	case 0:
-		// nothing
-	case 1:
-		level = hclog.Debug
-	default:
-		level = hclog.Trace
-	}
-
 	log := hclog.New(&hclog.LoggerOptions{
-		Name:  "isle-host",
-		Level: level,
+		Name:  "isle",
+		Level: ComputeLevel(s.Verbose),
 	})
 
 	if s.BGStart {

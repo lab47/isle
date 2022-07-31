@@ -1,0 +1,6 @@
+syntax = "proto3";
+
+package dev.lab47.isle.guestapi;
+
+option go_package = "lab47.dev/isle/guestapi";
+

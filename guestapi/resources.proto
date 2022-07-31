@@ -6,6 +6,8 @@ import "google/protobuf/any.proto";
 import "google/protobuf/timestamp.proto";
 import "google/protobuf/struct.proto";
 
+import "labels.proto";
+
 option go_package = "lab47.dev/isle/guestapi";
 
 message IPAddress {
@@ -65,6 +67,7 @@ message Resource {
   ResourceId id = 1;
   google.protobuf.Any resource = 2;
   ProvisionStatus provision_status = 3;
+  Labels labels = 4;
 }
 
 message CreateResourceReq {
@@ -107,10 +110,27 @@ message DeleteResourceResp {
   Resource resource = 1;
 }
 
+message ListResourcesReq {
+  oneof criteria {
+    Type type = 1;
+    Labels labels = 2;
+  }
+
+  message Type {
+    string category = 1;
+    string type = 2;
+  }
+}
+
+message ListResourcesResp {
+  repeated ResourceId ids = 1;
+}
+
 service ResourceAPI {
   rpc Create(CreateResourceReq) returns (CreateResourceResp);
   rpc Update(UpdateResourceReq) returns (UpdateResourceResp);
   rpc Read(ReadResourceReq) returns (ReadResourceResp);
   rpc CheckProvision(CheckProvisionReq) returns (CheckProvisionResp);
   rpc Delete(DeleteResourceReq) returns (DeleteResourceResp);
+  rpc List(ListResourcesReq) returns (ListResourcesResp);
 }

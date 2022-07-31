@@ -19,12 +19,13 @@ type RunEvent struct {
 }
 
 type RunConfig struct {
-	Logger    hclog.Logger
-	DataDir   string
-	HostBinds map[string]string
-	Listener  net.Listener
-	ClusterId string
-	EventsCh  chan RunEvent
+	Logger     hclog.Logger
+	DataDir    string
+	HostBinds  map[string]string
+	Listener   net.Listener
+	ClusterId  string
+	EventsCh   chan RunEvent
+	HelperPath string
 }
 
 func Run(ctx context.Context, cfg *RunConfig) error {
@@ -40,6 +41,7 @@ func Run(ctx context.Context, cfg *RunConfig) error {
 	do.ProvideNamedValue(inj, "data-dir", cfg.DataDir)
 	do.ProvideNamedValue(inj, "host-binds", cfg.HostBinds)
 	do.ProvideNamedValue(inj, "cluster-id", cfg.ClusterId)
+	do.ProvideNamedValue(inj, "helper-path", cfg.HelperPath)
 	do.Provide(inj, OpenDB)
 	do.Provide(inj, NewResourceContext)
 	do.Provide(inj, NewResourceStorage)
