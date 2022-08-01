@@ -7,11 +7,15 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/cli/config"
@@ -65,6 +69,13 @@ type VM struct {
 	vmConsoleWriter *os.File
 
 	eventCh chan Event
+
+	mountOnce      sync.Once
+	ownHomeLink    bool
+	linuxHomePath  string
+	linuxMountPath string
+
+	topCtx context.Context
 }
 
 type EventType int
@@ -255,6 +266,8 @@ func (v *VM) Run(ctx context.Context) error {
 		return err
 	}
 
+	v.topCtx = ctx
+
 	bootLoader := vz.NewLinuxBootLoader(
 		v.kernelPath,
 		vz.WithCommandLine(strings.Join(v.kernelCmdLine, " ")),
@@ -336,6 +349,17 @@ func (v *VM) Run(ctx context.Context) error {
 		}
 	}
 
+	defer func() {
+		out, err := exec.Command("umount", v.linuxMountPath).CombinedOutput()
+		if err != nil {
+			v.log.Error("error unmounting guest", "error", err, "output", string(out))
+		}
+
+		if v.ownHomeLink {
+			os.Remove(v.linuxHomePath)
+		}
+	}()
+
 	v.shutdownCh = make(chan struct{})
 
 	go v.handleConsole()
@@ -343,8 +367,6 @@ func (v *VM) Run(ctx context.Context) error {
 	if v.consoleReader != nil {
 		go io.Copy(v.hostWriter, v.consoleReader)
 	}
-
-	// go v.connectToGuest(ctx, sock)
 
 	for {
 		select {
@@ -466,6 +488,10 @@ func (v *VM) VMRunning(ctx context.Context, req *pbstream.Request[guestapi.Runni
 		Type: VMStarted,
 	})
 
+	v.mountOnce.Do(func() {
+		go v.mountLinux(req.Value.Ip)
+	})
+
 	return pbstream.NewResponse(&guestapi.RunningResp{
 		Timezone: tz,
 	}), nil
@@ -527,15 +553,6 @@ func (v *VM) startSessionListener(addr string, sockdev *vz.VirtioSocketDevice) e
 		v.log.Info("connection to multiplexer")
 
 		err = func() error {
-			// defer local.Close()
-
-			/*
-				var (
-					remote *vz.VirtioSocketConnection
-					err    error
-				)
-			*/
-
 			v.log.Trace("connecting to guest", "virtio-port", 47)
 
 			sockdev.ConnectToPort(47, func(remote *vz.VirtioSocketConnection, localErr error) {
@@ -735,4 +752,91 @@ func (v *VM) attachShare(config *vz.VirtualMachineConfiguration) error {
 	})
 
 	return nil
+}
+
+func (v *VM) isMounted(path string) bool {
+	a, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+
+	b, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		return false
+	}
+
+	as, ok := a.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+
+	bs, ok := b.Sys().(*syscall.Stat_t)
+	if !ok {
+		return false
+	}
+
+	return as.Dev != bs.Dev
+}
+
+func (v *VM) mountLinux(ip string) {
+	// lazy way to let smbd boot up first
+	time.Sleep(time.Second)
+
+	path := filepath.Join(v.stateDir, "linux")
+
+	v.log.Info("mounting vm storage", "path", path)
+
+	os.MkdirAll(path, 0755)
+
+	for {
+		var mounted bool
+
+		for i := 0; i < 100; i++ {
+			cmd := exec.Command("mount", "-t", "smbfs", fmt.Sprintf("//macstorage:mac@%s/storage", ip), path)
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				mounted = true
+				break
+			}
+
+			v.log.Error("unable to mount linux", "error", err, "output", string(out))
+			time.Sleep(time.Second)
+		}
+
+		if !mounted {
+			v.log.Error("error timed out trying to mount guest")
+			return
+		}
+
+		v.linuxMountPath = path
+
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return
+		}
+
+		homePath := filepath.Join(homeDir, "linux")
+
+		if _, err := os.Lstat(homePath); os.IsNotExist(err) {
+			os.Symlink(path, homePath)
+			v.ownHomeLink = true
+			v.linuxHomePath = homePath
+		}
+
+		tick := time.NewTicker(30 * time.Second)
+
+	loop:
+		for {
+			select {
+			case <-v.topCtx.Done():
+				return
+			case <-tick.C:
+				if !v.isMounted(path) {
+					break loop
+				}
+			}
+		}
+
+		v.log.Warn("detected linux storage is unmounted, remounting")
+	}
 }
