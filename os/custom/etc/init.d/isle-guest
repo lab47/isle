@@ -14,5 +14,5 @@ supervise_daemon_args="--stderr \"${SVC_ERRFILE}\" --stdout \"${SVC_OUTFILE}\""
 retry="${ISLE_RETRY:-TERM/60/KILL/10}"
 
 depend() {
-	need networking cgroups
+	need networking cgroups containerd
 }
