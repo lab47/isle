@@ -398,12 +398,8 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		return
 	}
 
-	stdinR, stdinW := io.Pipe()
-	stdoutR, stdoutW := io.Pipe()
-	stderrR, stderrW := io.Pipe()
-
 	opts := []cio.Opt{
-		cio.WithStreams(stdinR, stdoutW, stderrW),
+		cio.WithStreams(s, s, s.Stderr()),
 	}
 
 	if sp.Terminal {
@@ -447,50 +443,6 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		s.Exit(1)
 		return
 	}
-
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := s.Read(buf)
-			if n > 0 {
-				stdinW.Write(buf[:n])
-			}
-
-			if err != nil {
-				g.L.Info("stdin has closed")
-				stdinW.Close()
-				return
-			}
-		}
-	}()
-
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := stdoutR.Read(buf)
-			if n > 0 {
-				s.Write(buf[:n])
-			}
-
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	go func() {
-		buf := make([]byte, 1024)
-		for {
-			n, err := stderrR.Read(buf)
-			if n > 0 {
-				s.Write(buf[:n])
-			}
-
-			if err != nil {
-				return
-			}
-		}
-	}()
 
 	g.L.Info("waiting on exit status")
 
