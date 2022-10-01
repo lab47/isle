@@ -174,6 +174,68 @@ func (i *RunCmd) Execute(args []string) error {
 
 var runCmd RunCmd
 
+type ConsoleCmd struct{}
+
+func (i *ConsoleCmd) Execute(args []string) error {
+	ctx := context.Background()
+
+	cc, err := grpc.Dial("172.22.1.1:1212", grpc.WithInsecure())
+	if err != nil {
+		return err
+	}
+
+	cl := guestapi.NewGuestAPIClient(cc)
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	stream, err := cl.Console(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error running command: %s\n", err)
+		return nil
+	}
+
+	stream.Send(&guestapi.RunInput{
+		Command: args,
+	})
+
+	go func() {
+		buf := make([]byte, 1024)
+
+		for {
+			n, _ := os.Stdin.Read(buf)
+			if n == 0 {
+				stream.Send(&guestapi.RunInput{
+					Closed: true,
+				})
+				return
+			}
+
+			err := stream.Send(&guestapi.RunInput{
+				Input: buf[:n],
+			})
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	for {
+		out, err := stream.Recv()
+		if err != nil {
+			os.Exit(1)
+		}
+
+		if out.Closed {
+			os.Exit(int(out.ExitCode))
+		}
+
+		os.Stdout.Write(out.Data)
+	}
+}
+
+var consoleCmd ConsoleCmd
+
 type TrimCmd struct {
 	Set    int32 `long:"set" description:"set total memory megabytes"`
 	Add    int32 `short:"a" long:"adjust" description:"add memory to this isle"`
@@ -237,6 +299,12 @@ func Main(args []string) {
 		"execute a command on your mac",
 		"execute a command on your mac",
 		&runCmd,
+	)
+
+	parser.AddCommand("console",
+		"execute a command on the isle base OS",
+		"execute a command on the isle base OS",
+		&consoleCmd,
 	)
 
 	parser.AddCommand("trim-memory",

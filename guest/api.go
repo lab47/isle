@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	"github.com/fxamacker/cbor/v2"
@@ -177,4 +178,80 @@ func (g *Guest) RunOnMac(s guestapi.GuestAPI_RunOnMacServer) error {
 
 func (g *Guest) TrimMemory(ctx context.Context, req *guestapi.TrimMemoryReq) (*guestapi.TrimMemoryResp, error) {
 	return g.hostAPI().TrimMemory(ctx, req)
+}
+
+func (v *Guest) Console(s guestapi.GuestAPI_ConsoleServer) error {
+	in, err := s.Recv()
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(in.Command[0], in.Command[1:]...)
+	cmd.Env = os.Environ()
+	cmd.Dir = "/"
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return err
+	}
+
+	err = cmd.Start()
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		for {
+			m, err := s.Recv()
+			if err != nil {
+				return
+			}
+
+			if m.Closed {
+				stdin.Close()
+				return
+			}
+
+			stdin.Write(m.Input)
+		}
+	}()
+
+	buf := make([]byte, 1024)
+
+	for {
+		n, _ := stdout.Read(buf)
+		if n == 0 {
+			break
+		}
+
+		err := s.Send(&guestapi.RunOutput{
+			Data: buf[:n],
+		})
+		if err != nil {
+			break
+		}
+	}
+
+	var exit int
+
+	err = cmd.Wait()
+	if err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			exit = ee.ExitCode()
+		} else {
+			return err
+		}
+	}
+
+	s.Send(&guestapi.RunOutput{
+		Closed:   true,
+		ExitCode: int32(exit),
+	})
+
+	return nil
 }

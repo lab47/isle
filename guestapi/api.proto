@@ -9,6 +9,10 @@ service GuestAPI {
   rpc DisableApp(DisableAppReq) returns (DisableAppResp);
 
   rpc RunOnMac(stream RunInput) returns (stream RunOutput);
+
+  // Run a command on the base OS
+  rpc Console(stream RunInput) returns (stream RunOutput);
+
   rpc TrimMemory(TrimMemoryReq) returns (TrimMemoryResp);
 }
 
