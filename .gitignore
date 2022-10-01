@@ -1,2 +1,7 @@
+/vendor/
+
 /bin/
 /tmp/
+
+os/isle-guest
+os/isle-helper
