@@ -22,8 +22,11 @@ cli-release: build-release
 	mv output/linux.zip output/linux-$$VERSION-$$(go env GOARCH).zip
 
 .PHONY: os-release
-os-release: os/isle-guest os/isle-helper
+os-release: binaries
 	cd os && sudo make release VERSION=$$VERSION PLATFORM=$$(go env GOARCH)
+
+binaries: os/isle-guest os/isle-helper os/containerd-clog-logger
+.PHONY: binaries
 
 test-release: clean os/isle-guest os/isle-helper
 	cd os && sudo make release VERSION=0.0.0 PLATFORM=$$(go env GOARCH)
@@ -39,6 +42,9 @@ os/isle-guest:
 	GOOS=linux CGO_ENABLED=0 go build -o os/isle-guest ./cmd/isle-guest
 
 .PHONY: os/isle-guest
+
+os/containerd-clog-logger:
+	GOOS=linux CGO_ENABLED=0 go build -o os/containerd-clog-logger ./pkg/clog/containerd-clog-logger
 
 test-guest: os/isle-guest
 	cp os/isle-guest ~/mac/tmp
