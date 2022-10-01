@@ -7,7 +7,11 @@ codesign:
 
 .PHONY: build
 build:
-	go build -o bin/linux ./cmd/linux
+	GOOS=macos go build -o bin/linux ./cmd/linux
+
+test-build: build
+	cp bin/linux ~/mac/tmp
+.PHONY: test-build
 
 .PHONY: build-release
 build-release: compile-release codesign
@@ -51,3 +55,8 @@ test-guest: os/isle-guest
 
 os/isle-helper:
 	GOOS=linux CGO_ENABLED=0 go build -o os/isle-helper ./cmd/isle-helper
+
+.PHONY: os/isle-helper
+
+test-helper: os/isle-helper
+	cp os/isle-helper ~/mac/tmp
