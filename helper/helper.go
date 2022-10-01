@@ -28,7 +28,7 @@ func (i *InstallCmd) Execute(args []string) error {
 
 	ctx := context.Background()
 
-	cc, err := grpc.Dial("10.4.0.1:1212", grpc.WithInsecure())
+	cc, err := grpc.Dial("172.22.1.1:1212", grpc.WithInsecure())
 	if err != nil {
 		return err
 	}
@@ -63,7 +63,7 @@ func (i *RemoveCmd) Execute(args []string) error {
 
 	ctx := context.Background()
 
-	cc, err := grpc.Dial("10.4.0.1:1212", grpc.WithInsecure())
+	cc, err := grpc.Dial("172.22.1.1:1212", grpc.WithInsecure())
 	if err != nil {
 		return err
 	}
@@ -117,7 +117,7 @@ type RunCmd struct{}
 func (i *RunCmd) Execute(args []string) error {
 	ctx := context.Background()
 
-	cc, err := grpc.Dial("10.4.0.1:1212", grpc.WithInsecure())
+	cc, err := grpc.Dial("172.22.1.1:1212", grpc.WithInsecure())
 	if err != nil {
 		return err
 	}
@@ -246,7 +246,7 @@ type TrimCmd struct {
 func (i *TrimCmd) Execute(args []string) error {
 	ctx := context.Background()
 
-	cc, err := grpc.Dial("10.4.0.1:1212", grpc.WithInsecure())
+	cc, err := grpc.Dial("172.22.1.1:1212", grpc.WithInsecure())
 	if err != nil {
 		return err
 	}
