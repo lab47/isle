@@ -25,11 +25,23 @@ cli-release: build-release
 os-release: os/isle-guest os/isle-helper
 	cd os && sudo make release VERSION=$$VERSION PLATFORM=$$(go env GOARCH)
 
+test-release: clean os/isle-guest os/isle-helper
+	cd os && sudo make release VERSION=0.0.0 PLATFORM=$$(go env GOARCH)
+	mv os/os-v0.0.0-$$(go env GOARCH).tar.gz ~/mac/tmp
+
+clean:
+	rm -rf os/isle-guest os/isle-helper
+
 .PHONY: release
 release: cli-release os-release
 
 os/isle-guest:
 	GOOS=linux CGO_ENABLED=0 go build -o os/isle-guest ./cmd/isle-guest
+
+.PHONY: os/isle-guest
+
+test-guest: os/isle-guest
+	cp os/isle-guest ~/mac/tmp
 
 os/isle-helper:
 	GOOS=linux CGO_ENABLED=0 go build -o os/isle-helper ./cmd/isle-helper

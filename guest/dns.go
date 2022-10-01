@@ -16,7 +16,7 @@ type handler struct {
 	config *dns.ClientConfig
 	client *dns.Client
 
-	conns []*dns.Conn
+	addresses []string
 
 	configOnce sync.Once
 }
@@ -35,18 +35,12 @@ func (h *handler) updateConfig() {
 
 	client := &dns.Client{Net: "udp"}
 
-	var conns []*dns.Conn
-
 	for _, server := range config.Servers {
-		conn, err := client.Dial(server + ":" + config.Port)
-		if err == nil {
-			conns = append(conns, conn)
-		}
+		h.addresses = append(h.addresses, server+":"+config.Port)
 	}
 
 	h.config = config
 	h.client = client
-	h.conns = conns
 }
 
 func (h *handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
@@ -55,8 +49,8 @@ func (h *handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	h.L.Debug("processing dns request", "question", r.Question[0].String(), "client", w.RemoteAddr())
 
 	for i := 0; i < 10; i++ {
-		for _, conn := range h.conns {
-			msg, _, err := h.client.ExchangeWithConn(r, conn)
+		for _, addr := range h.addresses {
+			msg, _, err := h.client.Exchange(r, addr)
 			if err == nil {
 				if len(msg.Answer) == 0 {
 					h.L.Debug("no answer detected")

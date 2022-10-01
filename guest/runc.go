@@ -9,22 +9,27 @@ import (
 	"io/ioutil"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
+	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/archive"
-	"github.com/containerd/go-cni"
+	"github.com/containerd/containerd/cio"
+	"github.com/containerd/containerd/containers"
+	"github.com/containerd/containerd/oci"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-containerregistry/pkg/name"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/hashicorp/yamux"
+	"github.com/lab47/isle/network"
 	"github.com/lab47/isle/pkg/clog"
 	"github.com/lab47/isle/pkg/progressbar"
-	"github.com/lab47/isle/pkg/runc"
 	"github.com/lab47/isle/pkg/shardconfig"
-	"github.com/pkg/errors"
 	"github.com/rs/xid"
 
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -76,6 +81,41 @@ var perms = []string{
 	"CAP_CHECKPOINT_RESTORE",
 }
 
+func idToMac(id string) string {
+	h := sha256.New()
+	h.Write([]byte(id))
+
+	idBytes := h.Sum(nil)
+
+	hwaddr := make(net.HardwareAddr, 6)
+	copy(hwaddr, idBytes[2:])
+
+	hwaddr[0] = hwaddr[0] & 0b11111110
+
+	return hwaddr.String()
+}
+
+func (g *Guest) CleanupContainer(ctx context.Context, id string) {
+	cont, err := g.C.LoadContainer(ctx, id)
+	if err == nil {
+		task, err := cont.Task(ctx, nil)
+		if err == nil {
+			g.L.Info("cleaning up container", "id", id)
+
+			err := network.Delete(ctx, g.L, int(task.Pid()), id)
+			if err != nil {
+				g.L.Error("deleted cni for container", "id", id, "error", err)
+			}
+
+			task.Kill(ctx, syscall.SIGTERM)
+			time.Sleep(2 * time.Second)
+			task.Delete(ctx, containerd.WithProcessKill)
+
+			cont.Delete(ctx)
+		}
+	}
+}
+
 func (g *Guest) Container(ctx context.Context, info *ContainerInfo) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -83,6 +123,21 @@ func (g *Guest) Container(ctx context.Context, info *ContainerInfo) (string, err
 	rc, ok := g.running[info.Name]
 	if ok {
 		return rc.id, nil
+	}
+
+	cont, err := g.C.Containers(ctx, "labels.name=="+info.Name)
+	if err != nil {
+		return "", err
+	}
+
+	if len(cont) >= 1 {
+		id := cont[0].ID()
+
+		g.running[info.Name] = &runningContainer{
+			id: id,
+		}
+
+		return id, nil
 	}
 
 	started := make(chan string, 1)
@@ -309,9 +364,6 @@ func (g *Guest) StartContainer(
 				},
 			},
 		},
-		Root: &specs.Root{
-			Path: "rootfs",
-		},
 		Hostname: name,
 		Mounts: []specs.Mount{
 			{
@@ -482,39 +534,51 @@ func (g *Guest) StartContainer(
 		}
 	}
 
-	f, err := os.Create(filepath.Join(bundlePath, "config.json"))
+	var opts []containerd.NewContainerOpts
+	opts = append(opts,
+		containerd.WithNewSpec(
+			func(ctx context.Context, c1 oci.Client, c2 *containers.Container, is *oci.Spec) error {
+				*is = s
+				return nil
+			},
+			oci.WithRootFSPath(rootFsPath),
+		),
+		containerd.WithContainerLabels(map[string]string{
+			"name": info.Name,
+		}),
+	)
+
+	var ioCreator cio.Creator
+
+	loggerPath, err := exec.LookPath("containerd-clog-logger")
+	if err == nil {
+		ioCreator = cio.BinaryIO(loggerPath, map[string]string{
+			filepath.Join(bundlePath, "log"): "",
+		})
+	} else {
+		dw, err := clog.NewDirectoryWriter(filepath.Join(bundlePath, "log"), 0, 0)
+		if err != nil {
+			return err
+		}
+
+		logw, err := dw.IOInput(ctx)
+		if err != nil {
+			return err
+		}
+
+		ioCreator = cio.NewCreator(cio.WithStreams(nil, logw, logw))
+	}
+
+	client := g.C
+
+	container, err := client.NewContainer(ctx, id, opts...)
 	if err != nil {
 		return err
 	}
-
-	defer f.Close()
-
-	err = json.NewEncoder(f).Encode(s)
-	if err != nil {
-		return err
-	}
-
-	f.Close()
-
-	r := runc.Runc{
-		Debug: true,
-	}
-
-	started := make(chan int, 1)
 
 	g.L.Info("creating container", "id", id)
 
-	dw, err := clog.NewDirectoryWriter(filepath.Join(bundlePath, "log"), 0, 0)
-	if err != nil {
-		return err
-	}
-
-	logw, err := dw.IOInput(ctx)
-	if err != nil {
-		return err
-	}
-
-	io, err := runc.SetOutputIO(logw)
+	task, err := container.NewTask(ctx, ioCreator)
 	if err != nil {
 		return err
 	}
@@ -524,79 +588,26 @@ func (g *Guest) StartContainer(
 	os.RemoveAll(pidPath)
 	defer os.RemoveAll(pidPath)
 
-	err = r.Create(ctx, id, bundlePath, &runc.CreateOpts{
-		IO:      io,
-		PidFile: pidPath,
-	})
-
-	if err != nil {
-		return errors.Wrapf(err, "attempting to create container")
-	}
-
-	go func() {
-		for {
-			pid, err := runc.ReadPidFile(pidPath)
-			if err != nil {
-				time.Sleep(100 * time.Millisecond)
-				continue
-			}
-
-			started <- pid
-			return
-		}
-	}()
-
-	err = r.Start(ctx, id)
-	if err != nil {
-		return errors.Wrapf(err, "attempting to start container")
-	}
-
 	defer func() {
-		err := r.Delete(context.Background(), id, &runc.DeleteOpts{
-			Force: true,
-		})
-
-		g.L.Error("deleted container", "id", id, "error", err)
+		task.Delete(ctx, containerd.WithProcessKill)
+		container.Delete(ctx)
 	}()
-
-	var pid int
-
-	g.L.Info("waiting for signal that container started")
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case pid = <-started:
-		// ok
-	}
 
 	g.L.Info("configuring networking")
 
-	h := sha256.New()
-	h.Write([]byte(info.Name))
+	bc := &network.BridgeConfig{
+		Name: "isle0",
+		Id:   id,
+		MAC:  idToMac(id),
+		IPAM: g,
+	}
 
-	idBytes := h.Sum(nil)
+	addresses, err := network.ConfigureProcess(ctx, g.L, int(task.Pid()), bc)
+	if err != nil {
+		return err
+	}
 
-	v6addr := make(net.IP, net.IPv6len)
-	copy(v6addr, g.v6subnetAddr)
-
-	copy(v6addr[8:], idBytes[:8])
-
-	hwaddr := make(net.HardwareAddr, 6)
-	copy(hwaddr, idBytes[2:])
-
-	hwaddr[0] = hwaddr[0] & 0b11111110
-
-	mac := hwaddr.String()
-
-	g.L.Info("assigning container custom ipv6 address", "address", v6addr.String(), "mac", mac)
-
-	netPath := fmt.Sprintf("/proc/%d/ns/net", pid)
-
-	cniResult, err := g.cni.Setup(ctx, id, netPath,
-		cni.WithCapability("ips", []string{v6addr.String() + "/64"}),
-		cni.WithCapability("mac", mac),
-	)
+	err = task.Start(ctx)
 	if err != nil {
 		return err
 	}
@@ -607,7 +618,7 @@ func (g *Guest) StartContainer(
 			return
 		}
 
-		err := g.cni.Remove(ctx, id, netPath)
+		err := network.Delete(ctx, g.L, int(task.Pid()), bc.Id)
 		g.L.Error("deleted cni for container", "id", id, "error", err)
 	}()
 
@@ -640,32 +651,49 @@ func (g *Guest) StartContainer(
 
 	g.L.Info("running container setup")
 
-	err = r.Exec(ctx, id, setupSp, &runc.ExecOpts{})
+	proc, err := task.Exec(ctx, "setup", &setupSp,
+		cio.LogFile(filepath.Join(bundlePath, "setup.out")))
 	if err != nil {
 		return err
 	}
 
-	var target, target6 string
+	err = proc.Start(ctx)
+	if err != nil {
+		return err
+	}
 
-	primary, ok := cniResult.Interfaces["eth0"]
-	if !ok {
-		g.L.Info("CNI failed to report an eth0")
-	} else {
-		for _, ipconfig := range primary.IPConfigs {
-			if ipconfig.IP.To4() != nil {
-				target = ipconfig.IP.String()
-			} else {
-				target6 = ipconfig.IP.String()
-			}
+	ch, err := proc.Wait(ctx)
+	if err != nil {
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case es := <-ch:
+		if es.ExitCode() != 0 {
+			return fmt.Errorf("error running setup")
 		}
 	}
+
+	var target, target6 string
+
+	for _, addr := range addresses {
+		if addr.Address.IP.To4() != nil {
+			target = addr.Address.IP.String()
+		} else {
+			target6 = addr.Address.IP.String()
+		}
+	}
+
+	g.L.Info("addresses", "addreses", spew.Sdump(addresses))
 
 	if target == "" {
 		g.L.Info("CNI failed to report an IP, no port mapping enabled")
 	} else {
 		g.L.Info("networking configured", "ipv4", target, "ipv6", target6)
 
-		path := fmt.Sprintf("/proc/%d/net/tcp", pid)
+		path := fmt.Sprintf("/proc/%d/net/tcp", task.Pid())
 
 		g.L.Info("monitoring for ports", "path", path, "target", target)
 		go g.monitorPorts(ctx, info.Session, target, path)
@@ -711,17 +739,13 @@ loop:
 	ctx = context.Background()
 
 	g.L.Warn("removing networking")
-	err = g.cni.Remove(ctx, id, netPath)
+	err = network.Delete(ctx, g.L, int(task.Pid()), bc.Id)
 	if err != nil {
 		g.L.Error("error removing networking", "error", err)
 	}
 	removedCNI = true
 
 	g.L.Warn("removing container")
-
-	err = r.Delete(ctx, id, &runc.DeleteOpts{
-		Force: true,
-	})
 
 	if err != nil {
 		g.L.Error("error removing container", "error", err)

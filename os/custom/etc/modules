@@ -1,0 +1,6 @@
+af_packet
+ipv6
+bridge
+br_netfilter
+iptable_nat
+ip6table_nat

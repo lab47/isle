@@ -16,25 +16,21 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/containerd/console"
 	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/cio"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/snapshots"
-	"github.com/containerd/go-cni"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
 	"github.com/lab47/isle/guestapi"
-	"github.com/lab47/isle/pkg/netutil"
 	"github.com/lab47/isle/pkg/reaper"
-	"github.com/lab47/isle/pkg/runc"
 	"github.com/lab47/isle/pkg/ssh"
 	"github.com/lab47/isle/pkg/timesync"
 	"github.com/lab47/isle/types"
@@ -64,12 +60,10 @@ type Guest struct {
 
 	User      string
 	ClusterId string
+	SubnetId  string
 
 	v6clusterAddr net.IP
 	v6subnetAddr  net.IP
-
-	cni       cni.CNI
-	netconfig *netutil.NetworkConfigList
 
 	wg sync.WaitGroup
 
@@ -93,6 +87,14 @@ type Guest struct {
 	db *bbolt.DB
 
 	currentSession *yamux.Session
+
+	// networknig
+	gw4   net.IP
+	gw6   net.IP
+	v6net string
+
+	usedIps    map[string]string
+	lastUsedIP string
 }
 
 func newUniqueId() string {
@@ -154,32 +156,26 @@ func (g *Guest) Init(ctx context.Context) error {
 		}
 	}
 
-	copy(g.v6subnetAddr[6:], data)
+	g.SubnetId = subnet
 
-	ce := &netutil.CNIEnv{
-		Path:        "/usr/libexec/cni",
-		NetconfPath: "/etc/cni/net.d",
-	}
+	copy(g.v6subnetAddr[6:], data)
 
 	v6subnet := g.v6subnetAddr.String() + "/64"
 
-	ll, err := netutil.DefaultConfigList(ce, v6subnet)
+	_, v6net, err := net.ParseCIDR(v6subnet)
 	if err != nil {
 		return err
 	}
 
-	g.netconfig = ll
-
-	gc, err := cni.New(
-		cni.WithPluginDir([]string{"/usr/libexec/cni"}),
-		cni.WithConfListBytes(ll.Bytes),
-	)
-	if err != nil {
-		return err
+	g.v6net = v6subnet
+	g.gw6 = firstIP(v6net)
+	g.gw4 = net.ParseIP("172.22.1.1")
+	g.lastUsedIP = "172.22.1.1/24"
+	g.usedIps = map[string]string{
+		g.lastUsedIP: "_",
 	}
 
-	g.hostAddr = g.netconfig.GatewayV4
-	g.cni = gc
+	g.hostAddr = g.gw4.String()
 
 	ctx, cancel := context.WithCancel(ctx)
 	g.bgCtx = ctx
@@ -217,6 +213,17 @@ func (g *Guest) Init(ctx context.Context) error {
 
 	g.sshAgentPath = "/run/ssh-agent-host.sock"
 
+	client, err := containerd.New(
+		"/run/containerd/containerd.sock",
+		containerd.WithDefaultNamespace("isle"),
+	)
+
+	if err != nil {
+		return err
+	}
+
+	g.C = client
+
 	return nil
 }
 
@@ -232,6 +239,8 @@ func (g *Guest) Cleanup(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
+
+		g.CleanupContainer(ctx, r.id)
 	}
 
 	for _, r := range g.apps {
@@ -319,7 +328,7 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 
 	var (
 		width int
-		setup io.Writer = ioutil.Discard
+		setup = ioutil.Discard
 	)
 
 	if isPty {
@@ -371,120 +380,121 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		}
 	}
 
-	consock, err := runc.NewTempConsoleSocket()
+	client := g.C
+
+	container, err := client.LoadContainer(ctx, id)
 	if err != nil {
-		g.L.Error("error establishing console socket", "error", err)
-		fmt.Fprintf(s, "error establishing console socket: %s\n", err)
+		g.L.Error("error looking up container", "error", err)
+		fmt.Fprintf(s, "error looking up container: %s\n", err)
 		s.Exit(1)
 		return
 	}
 
-	started := make(chan int, 1)
-
-	tmpdir, err := ioutil.TempDir("", "yalrm4")
+	task, err := container.Task(ctx, nil)
 	if err != nil {
-		g.L.Error("error creating temp dir", "error", err)
-		fmt.Fprintf(s, "error creating temp dir: %s\n", err)
-		s.Exit(1)
-	}
-
-	defer os.RemoveAll(tmpdir)
-
-	pidPath := filepath.Join(tmpdir, "pid")
-
-	pio, _ := runc.NewSTDIO()
-
-	var r runc.Runc
-
-	err = r.Exec(ctx, id, *sp, &runc.ExecOpts{
-		IO:            pio,
-		ConsoleSocket: consock,
-		Detach:        true,
-		Started:       started,
-		PidFile:       pidPath,
-		Terminal:      true,
-	})
-	if err != nil {
-		g.L.Error("error executing command in container", "error", err)
-		fmt.Fprintf(s, "error executing command in container: %s\n", err)
+		g.L.Error("error looking up container task", "error", err)
+		fmt.Fprintf(s, "error looking up container task: %s\n", err)
 		s.Exit(1)
 		return
 	}
 
-	select {
-	case <-ctx.Done():
-		err = ctx.Err()
-		g.L.Error("error waiting for exec to start", "error", err)
-		fmt.Fprintf(s, "error waiting for exec to start: %s\n", err)
-		s.Exit(1)
-		return
-	case <-started:
-		// ok
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+	stderrR, stderrW := io.Pipe()
+
+	opts := []cio.Opt{
+		cio.WithStreams(stdinR, stdoutW, stderrW),
 	}
 
-	g.L.Info("reading process tty")
+	if sp.Terminal {
+		opts = append(opts, cio.WithTerminal)
+	}
 
-	con, err := consock.ReceiveMaster()
+	execId := xid.New().String()
+
+	proc, err := task.Exec(ctx, execId, sp, cio.NewCreator(opts...))
 	if err != nil {
-		g.L.Error("error setting up terminal", "error", err)
-		fmt.Fprintf(s, "error setting up terminal: %s\n", err)
+		g.L.Error("error creating exec", "error", err)
+		fmt.Fprintf(s, "error creating exec: %s\n", err)
 		s.Exit(1)
 		return
 	}
 
-	defer con.Close()
+	defer proc.Delete(ctx, containerd.WithProcessKill)
 
-	con.Resize(console.WinSize{
-		Height: uint16(ptyReq.Window.Height),
-		Width:  uint16(ptyReq.Window.Width),
-	})
+	err = proc.Start(ctx)
+	if err != nil {
+		g.L.Error("error starting exec", "error", err)
+		fmt.Fprintf(s, "error starting exec: %s\n", err)
+		s.Exit(1)
+		return
+	}
 
 	if isPty {
+		proc.Resize(ctx, uint32(ptyReq.Window.Width), uint32(ptyReq.Window.Height))
+
 		go func() {
 			for win := range winCh {
-				con.Resize(console.WinSize{
-					Height: uint16(win.Height),
-					Width:  uint16(win.Width),
-				})
+				proc.Resize(ctx, uint32(win.Width), uint32(win.Height))
 			}
 		}()
 	}
 
-	g.L.Info("reading pid file")
-
-	data, err := ioutil.ReadFile(pidPath)
+	ch, err := proc.Wait(ctx)
 	if err != nil {
-		g.L.Error("error reading pid file", "error", err)
-		fmt.Fprintf(s, "error reading pid file: %s\n", err)
+		g.L.Error("error waiting on proc", "error", err)
+		fmt.Fprintf(s, "error waiting on proc: %s\n", err)
 		s.Exit(1)
 		return
 	}
 
-	processPid, err := strconv.Atoi(string(data))
-	if err != nil {
-		g.L.Error("error parsing pid file", "error", err)
-		fmt.Fprintf(s, "error parsing pid file: %s\n", err)
-		s.Exit(1)
-		return
-	}
-
-	ch := g.reaper.Subscribe()
-	defer g.reaper.Unsubscribe(ch)
-
 	go func() {
-		defer con.Close()
-		io.Copy(s, con)
+		buf := make([]byte, 1024)
+		for {
+			n, err := s.Read(buf)
+			if n > 0 {
+				stdinW.Write(buf[:n])
+			}
+
+			if err != nil {
+				g.L.Info("stdin has closed")
+				stdinW.Close()
+				return
+			}
+		}
 	}()
 
 	go func() {
-		defer con.Close()
-		io.Copy(con, s)
+		buf := make([]byte, 1024)
+		for {
+			n, err := stdoutR.Read(buf)
+			if n > 0 {
+				s.Write(buf[:n])
+			}
+
+			if err != nil {
+				return
+			}
+		}
 	}()
 
-	var exitStatus runc.Exit
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, err := stderrR.Read(buf)
+			if n > 0 {
+				s.Write(buf[:n])
+			}
+
+			if err != nil {
+				return
+			}
+		}
+	}()
 
 	g.L.Info("waiting on exit status")
 
+	var code uint32
 loop:
 	for {
 		select {
@@ -493,16 +503,10 @@ loop:
 			s.Exit(130)
 			return
 		case exit := <-ch:
-			g.L.Info("exit detected", "pid", exit.Pid, "pidfile", processPid)
-
-			if exit.Pid == processPid {
-				exitStatus = exit
-				break loop
-			}
+			code = exit.ExitCode()
+			break loop
 		}
 	}
-
-	code := exitStatus.Status
 
 	g.L.Info("session has exitted", "code", code)
 
@@ -550,7 +554,7 @@ func (g *Guest) setupSnapshot(ctx context.Context, id string, i containerd.Image
 func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
 	g.currentSession = l
 
-	ctx = namespaces.WithNamespace(ctx, "msl")
+	ctx = namespaces.WithNamespace(ctx, "isle")
 
 	var key *rsa.PrivateKey
 
