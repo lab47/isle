@@ -19,6 +19,21 @@ import (
 	"github.com/vishvananda/netlink"
 )
 
+const MetadataIP = "169.254.168.1"
+
+var metadataNet *net.IPNet
+
+func init() {
+	ip, n, err := net.ParseCIDR(MetadataIP + "/16")
+	if err != nil {
+		panic(err)
+	}
+
+	n.IP = ip
+
+	metadataNet = n
+}
+
 func bridgeByName(name string) (*netlink.Bridge, error) {
 	l, err := netlink.LinkByName(name)
 	if err != nil {
@@ -147,7 +162,12 @@ func setupBridge(n *BridgeConfig) (*netlink.Bridge, *current.Interface, error) {
 	// create bridge if necessary
 	br, err := ensureBridge(n.Name, n.MTU, n.PromiscMode, vlanFiltering)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create bridge %q: %v", n.Name, err)
+		return nil, nil, fmt.Errorf("failed to create bridge %q: %w", n.Name, err)
+	}
+
+	err = ensureAddr(br, netlink.FAMILY_V4, metadataNet, false)
+	if err != nil {
+		return nil, nil, fmt.Errorf("error setting up metadata ip: %w", err)
 	}
 
 	return br, &current.Interface{
@@ -461,17 +481,17 @@ func ensureAddr(br netlink.Link, family int, ipn *net.IPNet, forceAddress bool) 
 			return nil
 		}
 
-		// Multiple IPv6 addresses are allowed on the bridge if the
+		// Multiple addresses are allowed on the bridge if the
 		// corresponding subnets do not overlap. For IPv4 or for
 		// overlapping IPv6 subnets, reconfigure the IP address if
 		// forceAddress is true, otherwise throw an error.
-		if family == netlink.FAMILY_V4 || a.Contains(ipn.IP) || ipn.Contains(a.IP) {
+		if a.Contains(ipn.IP) || ipn.Contains(a.IP) {
 			if forceAddress {
 				if err = deleteAddr(br, a.IPNet); err != nil {
 					return err
 				}
 			} else {
-				return fmt.Errorf("%q already has an IP address different from %v", br.Attrs().Name, ipnStr)
+				return fmt.Errorf("%q already has an IP address different from %v (%v, %v)", br.Attrs().Name, ipnStr, a.IP.String(), a.IPNet.String())
 			}
 		}
 	}

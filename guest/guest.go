@@ -30,6 +30,7 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
 	"github.com/lab47/isle/guestapi"
+	"github.com/lab47/isle/network"
 	"github.com/lab47/isle/pkg/reaper"
 	"github.com/lab47/isle/pkg/ssh"
 	"github.com/lab47/isle/pkg/timesync"
@@ -175,7 +176,7 @@ func (g *Guest) Init(ctx context.Context) error {
 		g.lastUsedIP: "_",
 	}
 
-	g.hostAddr = g.gw4.String()
+	g.hostAddr = network.MetadataIP
 
 	ctx, cancel := context.WithCancel(ctx)
 	g.bgCtx = ctx

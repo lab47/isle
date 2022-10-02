@@ -9,6 +9,7 @@ import (
 
 	"github.com/jessevdk/go-flags"
 	"github.com/lab47/isle/guestapi"
+	"github.com/lab47/isle/network"
 	"github.com/lab47/isle/pkg/clog"
 	"google.golang.org/grpc"
 )
@@ -20,6 +21,8 @@ type InstallCmd struct {
 	Name string `short:"n" description:"name of the app"`
 }
 
+const metadataAddr = network.MetadataIP + ":1212"
+
 func (i *InstallCmd) Execute(args []string) error {
 	if len(args) != 1 {
 		fmt.Printf("Specify the selector for the app\n")
@@ -28,7 +31,7 @@ func (i *InstallCmd) Execute(args []string) error {
 
 	ctx := context.Background()
 
-	cc, err := grpc.Dial("172.22.1.1:1212", grpc.WithInsecure())
+	cc, err := grpc.Dial(metadataAddr, grpc.WithInsecure())
 	if err != nil {
 		return err
 	}
@@ -63,7 +66,7 @@ func (i *RemoveCmd) Execute(args []string) error {
 
 	ctx := context.Background()
 
-	cc, err := grpc.Dial("172.22.1.1:1212", grpc.WithInsecure())
+	cc, err := grpc.Dial(metadataAddr, grpc.WithInsecure())
 	if err != nil {
 		return err
 	}
@@ -117,7 +120,7 @@ type RunCmd struct{}
 func (i *RunCmd) Execute(args []string) error {
 	ctx := context.Background()
 
-	cc, err := grpc.Dial("172.22.1.1:1212", grpc.WithInsecure())
+	cc, err := grpc.Dial(metadataAddr, grpc.WithInsecure())
 	if err != nil {
 		return err
 	}
@@ -179,7 +182,7 @@ type ConsoleCmd struct{}
 func (i *ConsoleCmd) Execute(args []string) error {
 	ctx := context.Background()
 
-	cc, err := grpc.Dial("172.22.1.1:1212", grpc.WithInsecure())
+	cc, err := grpc.Dial(metadataAddr, grpc.WithInsecure())
 	if err != nil {
 		return err
 	}
@@ -246,7 +249,7 @@ type TrimCmd struct {
 func (i *TrimCmd) Execute(args []string) error {
 	ctx := context.Background()
 
-	cc, err := grpc.Dial("172.22.1.1:1212", grpc.WithInsecure())
+	cc, err := grpc.Dial(metadataAddr, grpc.WithInsecure())
 	if err != nil {
 		return err
 	}
