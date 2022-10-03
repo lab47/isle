@@ -370,6 +370,10 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		sp.User.UID = 501
 		sp.User.GID = 1000
 		sp.User.Username = g.User
+		// This is a convience because docker uses 999 as it's gid, and setting
+		// this up now makes it possible for a user to install docker and have
+		// it just work, perms wise.
+		sp.User.AdditionalGids = append(sp.User.AdditionalGids, 999)
 
 		if sp.Cwd == "" {
 			sp.Cwd = "/home/" + g.User
