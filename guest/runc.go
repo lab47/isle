@@ -337,6 +337,8 @@ func (g *Guest) StartContainer(
 		return err
 	}
 
+	ioutil.WriteFile(filepath.Join(rootFsPath, "etc", "hostname"), []byte(name+"\n"), 0644)
+
 	volHome := "/vol/user/home/" + g.User
 
 	os.MkdirAll(filepath.Dir(volHome), 0755)
