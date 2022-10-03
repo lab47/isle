@@ -230,7 +230,7 @@ func (g *Guest) ociUnpacker(info *ContainerInfo) error {
 
 		bar := progressbar.NewOptions64(
 			max,
-			progressbar.OptionSetDescription("Downloading"),
+			progressbar.OptionSetDescription("Unpacking"),
 			progressbar.OptionSetWriter(info.Status),
 			progressbar.OptionShowBytes(true),
 			progressbar.OptionSetWidth(10),
