@@ -441,18 +441,6 @@ func (g *Guest) StartContainer(
 				Options:     []string{"rbind", "rshared", "rw"},
 			},
 			{
-				Destination: "/var/global-run",
-				Type:        "bind",
-				Source:      "/run",
-				Options:     []string{"rbind", "rshared", "rw"},
-			},
-			{
-				Destination: "/var/isle-containers",
-				Type:        "bind",
-				Source:      "/data/containers",
-				Options:     []string{"rbind", "rshared", "ro"},
-			},
-			{
 				Destination: "/share",
 				Type:        "bind",
 				Source:      "/share",
