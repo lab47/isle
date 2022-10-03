@@ -9,6 +9,14 @@ import (
 )
 
 func InitMain() {
+	// see if we should instead just launch the container's own
+	// init.
+
+	if _, err := os.Stat("/sbin/init"); err == nil {
+		unix.Exec("/sbin/init", []string{"/sbin/init"}, os.Environ())
+		// If exec fails, we stay running our own exec.
+	}
+
 	signal.Ignore(unix.SIGPIPE, unix.SIGINT)
 
 	ch := make(chan os.Signal, 1)

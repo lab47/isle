@@ -267,6 +267,20 @@ func (g *Guest) ociUnpacker(info *ContainerInfo) error {
 	return nil
 }
 
+type devEntry struct {
+	name         string
+	major, minor int
+}
+
+var devCharEntries = []devEntry{
+	{"null", 1, 3},
+	{"full", 1, 7},
+	{"random", 1, 8},
+	{"urandom", 1, 9},
+	{"tty", 5, 0},
+	{"zero", 1, 5},
+}
+
 func (g *Guest) StartContainer(
 	ctx context.Context,
 	info *ContainerInfo,
@@ -541,6 +555,8 @@ func (g *Guest) StartContainer(
 				*is = s
 				return nil
 			},
+			oci.WithDefaultUnixDevices,
+			oci.WithPrivileged,
 			oci.WithRootFSPath(rootFsPath),
 		),
 		containerd.WithContainerLabels(map[string]string{
@@ -627,6 +643,13 @@ func (g *Guest) StartContainer(
 		// we mount /run under the host's /run so that it can be
 		// accessed by the host.
 		"rm -rf /var/run; ln -s /run /var/run",
+		"mkdir -p /dev/char",
+	}
+
+	for _, ent := range devCharEntries {
+		setup = append(setup, fmt.Sprintf(
+			"ln -sf /dev/%s /dev/char/%d:%d", ent.name, ent.major, ent.minor,
+		))
 	}
 
 	if info.Config == nil || info.Config.Service == nil {
