@@ -1,0 +1,3 @@
+127.0.0.1       localhost localhost.localdomain
+::1             localhost localhost.localdomain
+169.254.168.1   metadata.isle
