@@ -11,11 +11,12 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"runtime/cgo"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
-	"github.com/rs/xid"
 	"golang.org/x/sys/unix"
 )
 
@@ -62,25 +63,17 @@ func NewVirtioSocketDeviceConfiguration() *VirtioSocketDeviceConfiguration {
 // the virtual machine creates it and you can get it via SocketDevices method.
 // see: https://developer.apple.com/documentation/virtualization/vzvirtiosocketdevice?language=objc
 type VirtioSocketDevice struct {
-	id string
-
 	dispatchQueue unsafe.Pointer
 	pointer
 }
 
-var connectionHandlers = map[string]func(conn *VirtioSocketConnection, err error){}
-
 func newVirtioSocketDevice(ptr, dispatchQueue unsafe.Pointer) *VirtioSocketDevice {
-	id := xid.New().String()
 	socketDevice := &VirtioSocketDevice{
-		id:            id,
 		dispatchQueue: dispatchQueue,
 		pointer: pointer{
 			ptr: ptr,
 		},
 	}
-	connectionHandlers[id] = func(*VirtioSocketConnection, error) {}
-
 	runtime.SetFinalizer(socketDevice, func(self *VirtioSocketDevice) {
 		self.Release()
 	})
@@ -102,14 +95,16 @@ func (v *VirtioSocketDevice) RemoveSocketListenerForPort(listener *VirtioSocketL
 }
 
 //export connectionHandler
-func connectionHandler(connPtr, errPtr unsafe.Pointer, cid *C.char) {
-	id := (*char)(cid).String()
+func connectionHandler(connPtr, errPtr, cgoHandlerPtr unsafe.Pointer) {
+	cgoHandler := *(*cgo.Handle)(cgoHandlerPtr)
+	handler := cgoHandler.Value().(func(*VirtioSocketConnection, error))
+	defer cgoHandler.Delete()
 	// see: startHandler
-	conn := newVirtioSocketConnection(connPtr)
 	if err := newNSError(errPtr); err != nil {
-		connectionHandlers[id](conn, err)
+		handler(nil, err)
 	} else {
-		connectionHandlers[id](conn, nil)
+		conn := newVirtioSocketConnection(connPtr)
+		handler(conn, nil)
 	}
 }
 
@@ -121,15 +116,8 @@ func connectionHandler(connPtr, errPtr unsafe.Pointer, cid *C.char) {
 // For a successful connection, this method sets the sourcePort property of the resulting VZVirtioSocketConnection object to a random port number.
 // see: https://developer.apple.com/documentation/virtualization/vzvirtiosocketdevice/3656677-connecttoport?language=objc
 func (v *VirtioSocketDevice) ConnectToPort(port uint32, fn func(conn *VirtioSocketConnection, err error)) {
-	connectionHandlers[v.id] = fn
-	cid := charWithGoString(v.id)
-	defer cid.Free()
-	ptr := v.Ptr()
-	if ptr == nil {
-		panic("nil socket value")
-	}
-
-	C.VZVirtioSocketDevice_connectToPort(ptr, v.dispatchQueue, C.uint32_t(port), cid.CString())
+	cgoHandler := cgo.NewHandle(fn)
+	C.VZVirtioSocketDevice_connectToPort(v.Ptr(), v.dispatchQueue, C.uint32_t(port), unsafe.Pointer(&cgoHandler))
 }
 
 // VirtioSocketListener a struct that listens for port-based connection requests from the guest operating system.
@@ -297,9 +285,6 @@ func (v *VirtioSocketConnection) SetReadDeadline(t time.Time) error {
 func (v *VirtioSocketConnection) SetWriteDeadline(t time.Time) error {
 	return v.file.SetWriteDeadline(t)
 }
-
-// ID returns connection ID. this ID is used as filename of the vsock protocol connection.
-func (v *VirtioSocketConnection) ID() string { return v.id }
 
 // DestinationPort returns the destination port number of the connection.
 func (v *VirtioSocketConnection) DestinationPort() uint32 {

@@ -5,11 +5,12 @@
 //
 
 #import "virtualization.h"
+#import "virtualization_view.h"
 
 char *copyCString(NSString *nss)
 {
     const char *cc = [nss UTF8String];
-    char *c = calloc([nss length]+1, 1);
+    char *c = calloc([nss length] + 1, 1);
     strncpy(c, cc, [nss length]);
     return c;
 }
@@ -17,13 +18,11 @@ char *copyCString(NSString *nss)
 @implementation Observer
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context;
 {
-    
+
     @autoreleasepool {
         if ([keyPath isEqualToString:@"state"]) {
             int newState = (int)[change[NSKeyValueChangeNewKey] integerValue];
-            char *vmid = copyCString((NSString *)context);
-            changeStateOnObserver(newState, vmid);
-            free(vmid);
+            changeStateOnObserver(newState, context);
         } else {
             // bool canVal = (bool)[change[NSKeyValueChangeNewKey] boolValue];
             // char *vmid = copyCString((NSString *)context);
@@ -89,7 +88,6 @@ void setInitialRamdiskURLVZLinuxBootLoader(void *bootLoaderPtr, const char *ramd
     }
 }
 
-
 /*!
  @abstract Validate the configuration.
  @param config  Virtual machine configuration.
@@ -99,13 +97,49 @@ void setInitialRamdiskURLVZLinuxBootLoader(void *bootLoaderPtr, const char *ramd
 bool validateVZVirtualMachineConfiguration(void *config, void **error)
 {
     return (bool)[(VZVirtualMachineConfiguration *)config
-            validateWithError:(NSError * _Nullable * _Nullable)error];
+        validateWithError:(NSError *_Nullable *_Nullable)error];
+}
+
+/*!
+ @abstract: Minimum amount of memory required by virtual machines.
+ @see VZVirtualMachineConfiguration.memorySize
+ */
+unsigned long long minimumAllowedMemorySizeVZVirtualMachineConfiguration()
+{
+    return (unsigned long long)[VZVirtualMachineConfiguration minimumAllowedMemorySize];
+}
+
+/*!
+ @abstract: Maximum amount of memory allowed for a virtual machine.
+ @see VZVirtualMachineConfiguration.memorySize
+ */
+unsigned long long maximumAllowedMemorySizeVZVirtualMachineConfiguration()
+{
+    return (unsigned long long)[VZVirtualMachineConfiguration maximumAllowedMemorySize];
+}
+
+/*!
+ @abstract: Minimum number of CPUs for a virtual machine.
+ @see VZVirtualMachineConfiguration.CPUCount
+ */
+unsigned int minimumAllowedCPUCountVZVirtualMachineConfiguration()
+{
+    return (unsigned int)[VZVirtualMachineConfiguration minimumAllowedCPUCount];
+}
+
+/*!
+ @abstract: Maximum number of CPUs for a virtual machine.
+ @see VZVirtualMachineConfiguration.CPUCount
+ */
+unsigned int maximumAllowedCPUCountVZVirtualMachineConfiguration()
+{
+    return (unsigned int)[VZVirtualMachineConfiguration maximumAllowedCPUCount];
 }
 
 /*!
  @abstract Create a new Virtual machine configuration.
  @param bootLoader Boot loader used when the virtual machine starts.
- 
+
  @param CPUCount Number of CPUs.
  @discussion
     The number of CPUs must be a value between VZVirtualMachineConfiguration.minimumAllowedCPUCount
@@ -113,7 +147,7 @@ bool validateVZVirtualMachineConfiguration(void *config, void **error)
 
  @see VZVirtualMachineConfiguration.minimumAllowedCPUCount
  @see VZVirtualMachineConfiguration.maximumAllowedCPUCount
- 
+
  @param memorySize Virtual machine memory size in bytes.
  @discussion
     The memory size must be a multiple of a 1 megabyte (1024 * 1024 bytes) between VZVirtualMachineConfiguration.minimumAllowedMemorySize
@@ -125,8 +159,8 @@ bool validateVZVirtualMachineConfiguration(void *config, void **error)
  @see VZVirtualMachineConfiguration.maximumAllowedMemorySize
  */
 void *newVZVirtualMachineConfiguration(void *bootLoaderPtr,
-                                        unsigned int CPUCount,
-                                        unsigned long long memorySize)
+    unsigned int CPUCount,
+    unsigned long long memorySize)
 {
     VZVirtualMachineConfiguration *config = [[VZVirtualMachineConfiguration alloc] init];
     [config setBootLoader:(VZLinuxBootLoader *)bootLoaderPtr];
@@ -140,18 +174,17 @@ void *newVZVirtualMachineConfiguration(void *bootLoaderPtr,
  @see VZVirtioEntropyDeviceConfiguration
 */
 void setEntropyDevicesVZVirtualMachineConfiguration(void *config,
-                                                    void *entropyDevices)
+    void *entropyDevices)
 {
     [(VZVirtualMachineConfiguration *)config setEntropyDevices:[(NSMutableArray *)entropyDevices copy]];
 }
-
 
 /*!
  @abstract List of memory balloon devices. Empty by default.
  @see VZVirtioTraditionalMemoryBalloonDeviceConfiguration
 */
 void setMemoryBalloonDevicesVZVirtualMachineConfiguration(void *config,
-                                                    void *memoryBalloonDevices)
+    void *memoryBalloonDevices)
 {
     [(VZVirtualMachineConfiguration *)config setMemoryBalloonDevices:[(NSMutableArray *)memoryBalloonDevices copy]];
 }
@@ -161,7 +194,7 @@ void setMemoryBalloonDevicesVZVirtualMachineConfiguration(void *config,
  @see VZVirtioNetworkDeviceConfiguration
  */
 void setNetworkDevicesVZVirtualMachineConfiguration(void *config,
-                                                          void *networkDevices)
+    void *networkDevices)
 {
     [(VZVirtualMachineConfiguration *)config setNetworkDevices:[(NSMutableArray *)networkDevices copy]];
 }
@@ -171,18 +204,17 @@ void setNetworkDevicesVZVirtualMachineConfiguration(void *config,
  @see VZVirtioConsoleDeviceSerialPortConfiguration
  */
 void setSerialPortsVZVirtualMachineConfiguration(void *config,
-                                                    void *serialPorts)
+    void *serialPorts)
 {
     [(VZVirtualMachineConfiguration *)config setSerialPorts:[(NSMutableArray *)serialPorts copy]];
 }
-
 
 /*!
  @abstract List of socket devices. Empty by default.
  @see VZVirtioSocketDeviceConfiguration
  */
 void setSocketDevicesVZVirtualMachineConfiguration(void *config,
-                                                 void *socketDevices)
+    void *socketDevices)
 {
     [(VZVirtualMachineConfiguration *)config setSocketDevices:[(NSMutableArray *)socketDevices copy]];
 }
@@ -192,7 +224,7 @@ void setSocketDevicesVZVirtualMachineConfiguration(void *config,
  @see VZVirtioBlockDeviceConfiguration
  */
 void setStorageDevicesVZVirtualMachineConfiguration(void *config,
-                                                   void *storageDevices)
+    void *storageDevices)
 {
     [(VZVirtualMachineConfiguration *)config setStorageDevices:[(NSMutableArray *)storageDevices copy]];
 }
@@ -203,6 +235,115 @@ void setStorageDevicesVZVirtualMachineConfiguration(void *config,
 void setDirectorySharingDevicesVZVirtualMachineConfiguration(void *config, void *directorySharingDevices)
 {
     [(VZVirtualMachineConfiguration *)config setDirectorySharingDevices:[(NSMutableArray *)directorySharingDevices copy]];
+}
+
+/*!
+ @abstract The hardware platform to use.
+ @discussion
+    Can be an instance of a VZGenericPlatformConfiguration or VZMacPlatformConfiguration. Defaults to VZGenericPlatformConfiguration.
+ */
+void setPlatformVZVirtualMachineConfiguration(void *config, void *platform)
+{
+    [(VZVirtualMachineConfiguration *)config setPlatform:(VZPlatformConfiguration *)platform];
+}
+
+/*!
+ @abstract List of graphics devices. Empty by default.
+ @see VZMacGraphicsDeviceConfiguration
+ */
+void setGraphicsDevicesVZVirtualMachineConfiguration(void *config, void *graphicsDevices)
+{
+    [(VZVirtualMachineConfiguration *)config setGraphicsDevices:[(NSMutableArray *)graphicsDevices copy]];
+}
+
+/*!
+ @abstract List of pointing devices. Empty by default.
+ @see VZUSBScreenCoordinatePointingDeviceConfiguration
+ */
+void setPointingDevicesVZVirtualMachineConfiguration(void *config, void *pointingDevices)
+{
+    [(VZVirtualMachineConfiguration *)config setPointingDevices:[(NSMutableArray *)pointingDevices copy]];
+}
+
+/*!
+ @abstract List of keyboards. Empty by default.
+ @see VZUSBKeyboardConfiguration
+ */
+void setKeyboardsVZVirtualMachineConfiguration(void *config, void *keyboards)
+{
+    [(VZVirtualMachineConfiguration *)config setKeyboards:[(NSMutableArray *)keyboards copy]];
+}
+
+/*!
+ @abstract List of audio devices. Empty by default.
+ @see VZVirtioSoundDeviceConfiguration
+ */
+void setAudioDevicesVZVirtualMachineConfiguration(void *config, void *audioDevices)
+{
+    [(VZVirtualMachineConfiguration *)config setAudioDevices:[(NSMutableArray *)audioDevices copy]];
+}
+
+/*!
+ @abstract Initialize a new Virtio Sound Device Configuration.
+ @discussion The device exposes a source or destination of sound.
+ */
+void *newVZVirtioSoundDeviceConfiguration()
+{
+    return [[VZVirtioSoundDeviceConfiguration alloc] init];
+}
+
+/*!
+ @abstract Set the list of audio streams exposed by this device. Empty by default.
+*/
+void setStreamsVZVirtioSoundDeviceConfiguration(void *audioDeviceConfiguration, void *streams)
+{
+    [(VZVirtioSoundDeviceConfiguration *)audioDeviceConfiguration setStreams:[(NSMutableArray *)streams copy]];
+}
+
+/*!
+ @abstract Initialize a new Virtio Sound Device Input Stream Configuration.
+ @discussion A PCM stream of input audio data, such as from a microphone.
+ */
+void *newVZVirtioSoundDeviceInputStreamConfiguration()
+{
+    return [[VZVirtioSoundDeviceInputStreamConfiguration alloc] init];
+}
+
+/*!
+ @abstract Initialize a new Virtio Sound Device Host Audio Input Stream Configuration.
+ */
+void *newVZVirtioSoundDeviceHostInputStreamConfiguration()
+{
+    VZVirtioSoundDeviceInputStreamConfiguration *inputStream = (VZVirtioSoundDeviceInputStreamConfiguration *)newVZVirtioSoundDeviceInputStreamConfiguration();
+    [inputStream setSource:[[VZHostAudioInputStreamSource alloc] init]];
+    return inputStream;
+}
+
+/*!
+ @abstract Initialize a new Virtio Sound Device Output Stream Configuration.
+ @discussion A PCM stream of output audio data, such as to a speaker.
+ */
+void *newVZVirtioSoundDeviceOutputStreamConfiguration()
+{
+    return [[VZVirtioSoundDeviceOutputStreamConfiguration alloc] init];
+}
+
+/*!
+ @abstract Initialize a new Virtio Sound Device Host Audio Output Stream Configuration.
+ */
+void *newVZVirtioSoundDeviceHostOutputStreamConfiguration()
+{
+    VZVirtioSoundDeviceOutputStreamConfiguration *outputStream = (VZVirtioSoundDeviceOutputStreamConfiguration *)newVZVirtioSoundDeviceOutputStreamConfiguration();
+    [outputStream setSink:[[VZHostAudioOutputStreamSink alloc] init]];
+    return outputStream;
+}
+
+/*!
+ @abstract The platform configuration for a generic Intel or ARM virtual machine.
+*/
+void *newVZGenericPlatformConfiguration()
+{
+    return [[VZGenericPlatformConfiguration alloc] init];
 }
 
 /*!
@@ -219,8 +360,8 @@ void *newVZFileHandleSerialPortAttachment(int readFileDescriptor, int writeFileD
         NSFileHandle *fileHandleForReading = [[NSFileHandle alloc] initWithFileDescriptor:readFileDescriptor];
         NSFileHandle *fileHandleForWriting = [[NSFileHandle alloc] initWithFileDescriptor:writeFileDescriptor];
         ret = [[VZFileHandleSerialPortAttachment alloc]
-                                       initWithFileHandleForReading:fileHandleForReading
-                                       fileHandleForWriting:fileHandleForWriting];
+            initWithFileHandleForReading:fileHandleForReading
+                    fileHandleForWriting:fileHandleForWriting];
     }
     return ret;
 }
@@ -230,7 +371,7 @@ void *newVZFileHandleSerialPortAttachment(int readFileDescriptor, int writeFileD
  @param filePath The path of the file for the attachment on the local file system.
  @param shouldAppend True if the file should be opened in append mode, false otherwise.
         When a file is opened in append mode, writing to that file will append to the end of it.
- @param error If not nil, used to report errors if intialization fails.
+ @param error If not nil, used to report errors if initialization fails.
  @return A VZFileSerialPortAttachment on success. Nil otherwise and the error parameter is populated if set.
  */
 void *newVZFileSerialPortAttachment(const char *filePath, bool shouldAppend, void **error)
@@ -240,7 +381,9 @@ void *newVZFileSerialPortAttachment(const char *filePath, bool shouldAppend, voi
         NSString *filePathNSString = [NSString stringWithUTF8String:filePath];
         NSURL *fileURL = [NSURL fileURLWithPath:filePathNSString];
         ret = [[VZFileSerialPortAttachment alloc]
-                    initWithURL:fileURL append:(BOOL)shouldAppend error:(NSError * _Nullable * _Nullable)error];
+            initWithURL:fileURL
+                 append:(BOOL)shouldAppend
+                  error:(NSError *_Nullable *_Nullable)error];
     }
     return ret;
 }
@@ -322,7 +465,7 @@ void *newVZFileHandleNetworkDeviceAttachment(int fileDescriptor)
     The configuration is only valid with valid MACAddress and attachment.
 
  @see VZVirtualMachineConfiguration.networkDevices
- 
+
  @param attachment  Base class for a network device attachment.
  @discussion
     A network device attachment defines how a virtual network device interfaces with the host system.
@@ -376,10 +519,9 @@ void *newVZDiskImageStorageDeviceAttachment(const char *diskPath, bool readOnly,
     NSURL *diskURL = [NSURL fileURLWithPath:diskPathNSString];
     return [[VZDiskImageStorageDeviceAttachment alloc]
         initWithURL:diskURL
-        readOnly:(BOOL)readOnly
-        error:(NSError * _Nullable * _Nullable)error];
+           readOnly:(BOOL)readOnly
+              error:(NSError *_Nullable *_Nullable)error];
 }
-
 
 /*!
  @abstract Create a configuration of the Virtio traditional memory balloon device.
@@ -450,20 +592,6 @@ void VZVirtioSocketDevice_removeSocketListenerForPort(void *socketDevice, void *
     });
 }
 
-typedef void (^connection_handler_t)(VZVirtioSocketConnection *, NSError *);
-
-connection_handler_t generateConnectionHandler(const char *socketDeviceID, void handler(void *, void *, char *))
-{
-    connection_handler_t ret;
-    @autoreleasepool {
-        NSString *str = [NSString stringWithUTF8String:socketDeviceID];
-        ret = Block_copy(^(VZVirtioSocketConnection *connection, NSError *err){
-            handler(connection, err, copyCString(str));
-        });
-    }
-    return ret;
-}
-
 /*!
  @abstract Connects to a specified port.
  @discussion Does nothing if the guest does not listen on that port.
@@ -471,15 +599,15 @@ connection_handler_t generateConnectionHandler(const char *socketDeviceID, void 
  @param completionHandler Block called after the connection has been successfully established or on error.
     The error parameter passed to the block is nil if the connection was successful.
  */
-void VZVirtioSocketDevice_connectToPort(void *socketDevice, void *vmQueue, uint32_t port, const char *socketDeviceID)
+void VZVirtioSocketDevice_connectToPort(void *socketDevice, void *vmQueue, uint32_t port, void *cgoHandlerPtr)
 {
-    connection_handler_t handler = generateConnectionHandler(socketDeviceID, connectionHandler);
     dispatch_sync((dispatch_queue_t)vmQueue, ^{
-        [(VZVirtioSocketDevice *)socketDevice connectToPort:port completionHandler:handler];
+        [(VZVirtioSocketDevice *)socketDevice connectToPort:port
+                                          completionHandler:^(VZVirtioSocketConnection *connection, NSError *err) {
+                                              connectionHandler(connection, err, cgoHandlerPtr);
+                                          }];
     });
-    Block_release(handler);
 }
-
 
 VZVirtioSocketConnectionFlat convertVZVirtioSocketConnection2Flat(void *connection)
 {
@@ -499,17 +627,17 @@ VZVirtioSocketConnectionFlat convertVZVirtioSocketConnection2Flat(void *connecti
     Every operation on the virtual machine must be done on that queue. The callbacks and delegate methods are invoked on that queue.
     If the queue is not serial, the behavior is undefined.
  */
-void *newVZVirtualMachineWithDispatchQueue(void *config, void *queue, const char *vmid)
+void *newVZVirtualMachineWithDispatchQueue(void *config, void *queue, void *statusHandler)
 {
     VZVirtualMachine *vm = [[VZVirtualMachine alloc]
-                initWithConfiguration:(VZVirtualMachineConfiguration *)config
-                queue:(dispatch_queue_t)queue];
+        initWithConfiguration:(VZVirtualMachineConfiguration *)config
+                        queue:(dispatch_queue_t)queue];
     @autoreleasepool {
         Observer *o = [[Observer alloc] init];
-        NSString *str = [NSString stringWithUTF8String:vmid];
-        [vm addObserver:o forKeyPath:@"state"
+        [vm addObserver:o
+             forKeyPath:@"state"
                 options:NSKeyValueObservingOptionNew
-                context:[str copy]];
+                context:statusHandler];
     }
     return vm;
 }
@@ -533,6 +661,7 @@ void VZVirtioMemoryBalloonDevice_setTargetVirtualMachineMemorySize(void *dev, ui
 {
     [(VZVirtioTraditionalMemoryBalloonDevice*)dev setTargetVirtualMachineMemorySize:mem];
 }
+
 
 /*!
  @abstract Initialize the VZMACAddress from a string representation of a MAC address.
@@ -591,7 +720,7 @@ const char *getVZMACAddressString(void *macAddress)
     If the directory should be mounted read only.
  @return A VZSharedDirectory
  */
-void* newVZSharedDirectory(const char *dirPath, bool readOnly)
+void *newVZSharedDirectory(const char *dirPath, bool readOnly)
 {
     VZSharedDirectory *ret;
     @autoreleasepool {
@@ -608,7 +737,7 @@ void* newVZSharedDirectory(const char *dirPath, bool readOnly)
     The shared directory to use.
  @return A VZSingleDirectoryShare
  */
-void* newVZSingleDirectoryShare(void *sharedDirectory)
+void *newVZSingleDirectoryShare(void *sharedDirectory)
 {
     return [[VZSingleDirectoryShare alloc] initWithDirectory:(VZSharedDirectory *)sharedDirectory];
 }
@@ -619,9 +748,9 @@ void* newVZSingleDirectoryShare(void *sharedDirectory)
     NSDictionary mapping names to shared directories.
  @return A VZMultipleDirectoryShare
  */
-void* newVZMultipleDirectoryShare(void *sharedDirectories)
+void *newVZMultipleDirectoryShare(void *sharedDirectories)
 {
-    return [[VZMultipleDirectoryShare alloc] initWithDirectories:(NSDictionary<NSString *,VZSharedDirectory *> *)sharedDirectories];
+    return [[VZMultipleDirectoryShare alloc] initWithDirectories:(NSDictionary<NSString *, VZSharedDirectory *> *)sharedDirectories];
 }
 
 /*!
@@ -630,7 +759,7 @@ void* newVZMultipleDirectoryShare(void *sharedDirectories)
     The tag to use for this device configuration.
  @return A VZVirtioFileSystemDeviceConfiguration
  */
-void* newVZVirtioFileSystemDeviceConfiguration(const char *tag)
+void *newVZVirtioFileSystemDeviceConfiguration(const char *tag)
 {
     VZVirtioFileSystemDeviceConfiguration *ret;
     @autoreleasepool {
@@ -649,6 +778,24 @@ void setVZVirtioFileSystemDeviceConfigurationShare(void *config, void *share)
 }
 
 /*!
+ @abstract Initialize a new configuration for a USB pointing device that reports absolute coordinates.
+ @discussion This device can be used by VZVirtualMachineView to send pointer events to the virtual machine.
+ */
+void *newVZUSBScreenCoordinatePointingDeviceConfiguration()
+{
+    return [[VZUSBScreenCoordinatePointingDeviceConfiguration alloc] init];
+}
+
+/*!
+ @abstract Initialize a new configuration for a USB keyboard.
+ @discussion This device can be used by VZVirtualMachineView to send key events to the virtual machine.
+ */
+void *newVZUSBKeyboardConfiguration()
+{
+    return [[VZUSBKeyboardConfiguration alloc] init];
+}
+
+/*!
  @abstract Request that the guest turns itself off.
  @param error If not nil, assigned with the error if the request failed.
  @return YES if the request was made successfully.
@@ -657,58 +804,53 @@ bool requestStopVirtualMachine(void *machine, void *queue, void **error)
 {
     __block BOOL ret;
     dispatch_sync((dispatch_queue_t)queue, ^{
-        ret = [(VZVirtualMachine *)machine requestStopWithError:(NSError * _Nullable *_Nullable)error];
+        ret = [(VZVirtualMachine *)machine requestStopWithError:(NSError *_Nullable *_Nullable)error];
     });
     return (bool)ret;
 }
 
 void *makeDispatchQueue(const char *label)
 {
-    //dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_DEFAULT, 0);
+    // dispatch_queue_attr_t attr = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_DEFAULT, 0);
     dispatch_queue_t queue = dispatch_queue_create(label, DISPATCH_QUEUE_SERIAL);
-    //dispatch_retain(queue);
+    // dispatch_retain(queue);
     return queue;
 }
 
-typedef void (^handler_t)(NSError *);
-
-handler_t generateHandler(const char *vmid, void handler(void *, char *))
+void startWithCompletionHandler(void *machine, void *queue, void *completionHandler)
 {
-    handler_t ret;
-    @autoreleasepool {
-        NSString *str = [NSString stringWithUTF8String:vmid];
-        ret = Block_copy(^(NSError *err){
-            handler(err, copyCString(str));
-        });
-    }
-    return ret;
+    dispatch_sync((dispatch_queue_t)queue, ^{
+        [(VZVirtualMachine *)machine startWithCompletionHandler:^(NSError *err) {
+            virtualMachineCompletionHandler(completionHandler, err);
+        }];
+    });
 }
 
-void startWithCompletionHandler(void *machine, void *queue, const char *vmid)
+void pauseWithCompletionHandler(void *machine, void *queue, void *completionHandler)
 {
-    handler_t handler = generateHandler(vmid, startHandler);
     dispatch_sync((dispatch_queue_t)queue, ^{
-        [(VZVirtualMachine *)machine startWithCompletionHandler:handler];
+        [(VZVirtualMachine *)machine pauseWithCompletionHandler:^(NSError *err) {
+            virtualMachineCompletionHandler(completionHandler, err);
+        }];
     });
-    Block_release(handler);
 }
 
-void pauseWithCompletionHandler(void *machine, void *queue, const char *vmid)
+void resumeWithCompletionHandler(void *machine, void *queue, void *completionHandler)
 {
-    handler_t handler = generateHandler(vmid, pauseHandler);
     dispatch_sync((dispatch_queue_t)queue, ^{
-        [(VZVirtualMachine *)machine pauseWithCompletionHandler:handler];
+        [(VZVirtualMachine *)machine resumeWithCompletionHandler:^(NSError *err) {
+            virtualMachineCompletionHandler(completionHandler, err);
+        }];
     });
-    Block_release(handler);
 }
 
-void resumeWithCompletionHandler(void *machine, void *queue, const char *vmid)
+void stopWithCompletionHandler(void *machine, void *queue, void *completionHandler)
 {
-    handler_t handler = generateHandler(vmid, pauseHandler);
     dispatch_sync((dispatch_queue_t)queue, ^{
-        [(VZVirtualMachine *)machine resumeWithCompletionHandler:handler];
+        [(VZVirtualMachine *)machine stopWithCompletionHandler:^(NSError *err) {
+            virtualMachineCompletionHandler(completionHandler, err);
+        }];
     });
-    Block_release(handler);
 }
 
 // TODO(codehex): use KVO
@@ -747,4 +889,34 @@ bool vmCanRequestStop(void *machine, void *queue)
     });
     return (bool)result;
 }
+
+bool vmCanStop(void *machine, void *queue)
+{
+    __block BOOL result;
+    dispatch_sync((dispatch_queue_t)queue, ^{
+        result = ((VZVirtualMachine *)machine).canStop;
+    });
+    return (bool)result;
+}
 // --- TODO end
+
+void sharedApplication()
+{
+    // Create a shared app instance.
+    // This will initialize the global variable
+    // 'NSApp' with the application instance.
+    [VZApplication sharedApplication];
+}
+
+void startVirtualMachineWindow(void *machine, double width, double height)
+{
+    @autoreleasepool {
+        AppDelegate *appDelegate = [[[AppDelegate alloc]
+            initWithVirtualMachine:(VZVirtualMachine *)machine
+                       windowWidth:(CGFloat)width
+                      windowHeight:(CGFloat)height] autorelease];
+
+        NSApp.delegate = appDelegate;
+        [NSApp run];
+    }
+}

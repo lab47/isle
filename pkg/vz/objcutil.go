@@ -85,21 +85,11 @@ bool hasError(void *err)
 	return (NSError *)err != nil;
 }
 
-void *minimumAlloc()
-{
-	return [[NSMutableData dataWithLength:1] mutableBytes];
-}
-
 void releaseNSObject(void* o)
 {
 	@autoreleasepool {
 		[(NSObject*)o release];
 	}
-}
-
-static inline void startNSThread()
-{
-	[[NSThread new] start]; // put the runtime into multi-threaded mode
 }
 
 static inline void releaseDispatch(void *queue)
@@ -117,6 +107,16 @@ void* getNSArrayItem(void *ptr, int i)
 	NSArray *arr = (NSArray *)ptr;
 	return [arr objectAtIndex:i];
 }
+
+const char *getUUID()
+{
+	const char *ret;
+	@autoreleasepool {
+		NSString *uuid = [[NSUUID UUID] UUIDString];
+		ret = [uuid UTF8String];
+	}
+	return ret;
+}
 */
 import "C"
 import (
@@ -124,11 +124,6 @@ import (
 	"runtime"
 	"unsafe"
 )
-
-// startNSThread starts NSThread.
-func startNSThread() {
-	C.startNSThread()
-}
 
 // releaseDispatch releases allocated dispatch_queue_t
 func releaseDispatch(p unsafe.Pointer) {
@@ -271,4 +266,8 @@ func convertToNSMutableDictionary(d map[string]NSObject) *pointer {
 		self.Release()
 	})
 	return p
+}
+
+func getUUID() *char {
+	return (*char)(C.getUUID())
 }

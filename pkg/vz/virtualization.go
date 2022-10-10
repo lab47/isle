@@ -2,20 +2,19 @@ package vz
 
 /*
 #cgo darwin CFLAGS: -x objective-c -fno-objc-arc
-#cgo darwin LDFLAGS: -lobjc -framework Foundation -framework Virtualization
+#cgo darwin LDFLAGS: -lobjc -framework Foundation -framework Virtualization -framework Cocoa
 # include "virtualization.h"
 */
 import "C"
 import (
 	"runtime"
+	"runtime/cgo"
 	"sync"
 	"unsafe"
-
-	"github.com/rs/xid"
 )
 
 func init() {
-	startNSThread()
+	C.sharedApplication()
 }
 
 // VirtualMachineState represents execution state of the virtual machine.
@@ -45,6 +44,10 @@ const (
 	// VirtualMachineStateResuming The virtual machine is being resumed.
 	// This is the intermediate state between VirtualMachineStatePaused and VirtualMachineStateRunning.
 	VirtualMachineStateResuming
+
+	// VZVirtualMachineStateStopping The virtual machine is being stopped.
+	// This is the intermediate state between VZVirtualMachineStateRunning and VZVirtualMachineStateStop.
+	VirtualMachineStateStopping
 )
 
 // VirtualMachine represents the entire state of a single virtual machine.
@@ -70,28 +73,17 @@ type VirtualMachine struct {
 
 	pointer
 	dispatchQueue unsafe.Pointer
+	status        cgo.Handle
 
 	mu sync.Mutex
 }
 
-type (
-	machineStatus struct {
-		state       VirtualMachineState
-		stateNotify chan VirtualMachineState
+type machineStatus struct {
+	state       VirtualMachineState
+	stateNotify chan VirtualMachineState
 
-		mu sync.RWMutex
-	}
-	machineHandlers struct {
-		start  func(error)
-		pause  func(error)
-		resume func(error)
-	}
-)
-
-var (
-	handlers = map[string]*machineHandlers{}
-	statuses = map[string]*machineStatus{}
-)
+	mu sync.RWMutex
+}
 
 // NewVirtualMachine creates a new VirtualMachine with VirtualMachineConfiguration.
 //
@@ -101,31 +93,30 @@ var (
 // A new dispatch queue will create when called this function.
 // Every operation on the virtual machine must be done on that queue. The callbacks and delegate methods are invoked on that queue.
 func NewVirtualMachine(config *VirtualMachineConfiguration) *VirtualMachine {
-	id := xid.New().String()
-	cs := charWithGoString(id)
-	defer cs.Free()
-	statuses[id] = &machineStatus{
+	// should not call Free function for this string.
+	cs := getUUID()
+	dispatchQueue := C.makeDispatchQueue(cs.CString())
+
+	status := cgo.NewHandle(&machineStatus{
 		state:       VirtualMachineState(0),
 		stateNotify: make(chan VirtualMachineState),
-	}
-	handlers[id] = &machineHandlers{
-		start:  func(error) {},
-		pause:  func(error) {},
-		resume: func(error) {},
-	}
-	dispatchQueue := C.makeDispatchQueue(cs.CString())
+	})
+
 	v := &VirtualMachine{
-		id: id,
+		id: cs.String(),
 		pointer: pointer{
 			ptr: C.newVZVirtualMachineWithDispatchQueue(
 				config.Ptr(),
 				dispatchQueue,
-				cs.CString(),
+				unsafe.Pointer(&status),
 			),
 		},
 		dispatchQueue: dispatchQueue,
+		status:        status,
 	}
+
 	runtime.SetFinalizer(v, func(self *VirtualMachine) {
+		self.status.Delete()
 		releaseDispatch(self.dispatchQueue)
 		self.Release()
 	})
@@ -167,17 +158,16 @@ func (v *VirtualMachine) MemoryBalloonDevices() []*VirtioMemoryBalloonDevice {
 }
 
 //export changeStateOnObserver
-func changeStateOnObserver(state C.int, cID *C.char) {
-	id := (*char)(cID)
+func changeStateOnObserver(state C.int, cgoHandlerPtr unsafe.Pointer) {
+	status := *(*cgo.Handle)(cgoHandlerPtr)
 	// I expected it will not cause panic.
 	// if caused panic, that's unexpected behavior.
-	v, _ := statuses[id.String()]
+	v, _ := status.Value().(*machineStatus)
 	v.mu.Lock()
 	newState := VirtualMachineState(state)
 	v.state = newState
 	// for non-blocking
 	go func() { v.stateNotify <- newState }()
-	statuses[id.String()] = v
 	v.mu.Unlock()
 }
 
@@ -185,7 +175,7 @@ func changeStateOnObserver(state C.int, cID *C.char) {
 func (v *VirtualMachine) State() VirtualMachineState {
 	// I expected it will not cause panic.
 	// if caused panic, that's unexpected behavior.
-	val, _ := statuses[v.id]
+	val, _ := v.status.Value().(*machineStatus)
 	val.mu.RLock()
 	defer val.mu.RUnlock()
 	return val.state
@@ -195,7 +185,7 @@ func (v *VirtualMachine) State() VirtualMachineState {
 func (v *VirtualMachine) StateChangedNotify() <-chan VirtualMachineState {
 	// I expected it will not cause panic.
 	// if caused panic, that's unexpected behavior.
-	val, _ := statuses[v.id]
+	val, _ := v.status.Value().(*machineStatus)
 	val.mu.RLock()
 	defer val.mu.RUnlock()
 	return val.stateNotify
@@ -221,37 +211,21 @@ func (v *VirtualMachine) CanRequestStop() bool {
 	return (bool)(C.vmCanRequestStop(v.Ptr(), v.dispatchQueue))
 }
 
-//export startHandler
-func startHandler(errPtr unsafe.Pointer, cid *C.char) {
-	id := (*char)(cid).String()
-	// If returns nil in the cgo world, the nil will not be treated as nil in the Go world
-	// so this is temporarily handled (Go 1.17)
-	if err := newNSError(errPtr); err != nil {
-		handlers[id].start(err)
-	} else {
-		handlers[id].start(nil)
-	}
+// CanStop returns whether the machine is in a state that can be stopped.
+func (v *VirtualMachine) CanStop() bool {
+	return (bool)(C.vmCanStop(v.Ptr(), v.dispatchQueue))
 }
 
-//export pauseHandler
-func pauseHandler(errPtr unsafe.Pointer, cid *C.char) {
-	id := (*char)(cid).String()
-	// see: startHandler
-	if err := newNSError(errPtr); err != nil {
-		handlers[id].pause(err)
-	} else {
-		handlers[id].pause(nil)
-	}
-}
+//export virtualMachineCompletionHandler
+func virtualMachineCompletionHandler(cgoHandlerPtr, errPtr unsafe.Pointer) {
+	cgoHandler := *(*cgo.Handle)(cgoHandlerPtr)
 
-//export resumeHandler
-func resumeHandler(errPtr unsafe.Pointer, cid *C.char) {
-	id := (*char)(cid).String()
-	// see: startHandler
+	handler := cgoHandler.Value().(func(error))
+
 	if err := newNSError(errPtr); err != nil {
-		handlers[id].resume(err)
+		handler(err)
 	} else {
-		handlers[id].resume(nil)
+		handler(nil)
 	}
 }
 
@@ -269,23 +243,21 @@ func makeHandler(fn func(error)) (func(error), chan struct{}) {
 // The error parameter passed to the block is null if the start was successful.
 func (v *VirtualMachine) Start(fn func(error)) {
 	h, done := makeHandler(fn)
-	handlers[v.id].start = h
-	cid := charWithGoString(v.id)
-	defer cid.Free()
-	C.startWithCompletionHandler(v.Ptr(), v.dispatchQueue, cid.CString())
+	handler := cgo.NewHandle(h)
+	defer handler.Delete()
+	C.startWithCompletionHandler(v.Ptr(), v.dispatchQueue, unsafe.Pointer(&handler))
 	<-done
 }
 
 // Pause a virtual machine that is in Running state.
 //
 // - fn parameter called after the virtual machine has been successfully paused or on error.
-// The error parameter passed to the block is null if the start was successful.
+// The error parameter passed to the block is null if the pause was successful.
 func (v *VirtualMachine) Pause(fn func(error)) {
 	h, done := makeHandler(fn)
-	handlers[v.id].pause = h
-	cid := charWithGoString(v.id)
-	defer cid.Free()
-	C.pauseWithCompletionHandler(v.Ptr(), v.dispatchQueue, cid.CString())
+	handler := cgo.NewHandle(h)
+	defer handler.Delete()
+	C.pauseWithCompletionHandler(v.Ptr(), v.dispatchQueue, unsafe.Pointer(&handler))
 	<-done
 }
 
@@ -295,17 +267,16 @@ func (v *VirtualMachine) Pause(fn func(error)) {
 // The error parameter passed to the block is null if the resumption was successful.
 func (v *VirtualMachine) Resume(fn func(error)) {
 	h, done := makeHandler(fn)
-	handlers[v.id].resume = h
-	cid := charWithGoString(v.id)
-	defer cid.Free()
-	C.resumeWithCompletionHandler(v.Ptr(), v.dispatchQueue, cid.CString())
+	handler := cgo.NewHandle(h)
+	defer handler.Delete()
+	C.resumeWithCompletionHandler(v.Ptr(), v.dispatchQueue, unsafe.Pointer(&handler))
 	<-done
 }
 
 // RequestStop requests that the guest turns itself off.
 //
 // If returned error is not nil, assigned with the error if the request failed.
-// Returens true if the request was made successfully.
+// Returns true if the request was made successfully.
 func (v *VirtualMachine) RequestStop() (bool, error) {
 	nserr := newNSErrorAsNil()
 	nserrPtr := nserr.Ptr()
@@ -314,4 +285,26 @@ func (v *VirtualMachine) RequestStop() (bool, error) {
 		return ret, err
 	}
 	return ret, nil
+}
+
+// Stop stops a VM that’s in either a running or paused state.
+//
+// The completion handler returns an error object when the VM fails to stop,
+// or nil if the stop was successful.
+//
+// Warning: This is a destructive operation. It stops the VM without
+// giving the guest a chance to stop cleanly.
+func (v *VirtualMachine) Stop(fn func(error)) {
+	h, done := makeHandler(fn)
+	handler := cgo.NewHandle(h)
+	defer handler.Delete()
+	C.stopWithCompletionHandler(v.Ptr(), v.dispatchQueue, unsafe.Pointer(&handler))
+	<-done
+}
+
+// StartGraphicApplication starts an application to display graphics of the VM.
+//
+// You must to call runtime.LockOSThread before calling this method.
+func (v *VirtualMachine) StartGraphicApplication(width, height float64) {
+	C.startVirtualMachineWindow(v.Ptr(), C.double(width), C.double(height))
 }

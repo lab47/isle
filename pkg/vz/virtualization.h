@@ -10,11 +10,9 @@
 #import <Virtualization/Virtualization.h>
 
 /* exported from cgo */
-void startHandler(void *err, char *id);
-void pauseHandler(void *err, char *id);
-void resumeHandler(void *err, char *id);
-void connectionHandler(void *connection, void *err, char *id);
-void changeStateOnObserver(int state, char *id);
+void virtualMachineCompletionHandler(void *cgoHandler, void *errPtr);
+void connectionHandler(void *connection, void *err, void *cgoHandlerPtr);
+void changeStateOnObserver(int state, void *cgoHandler);
 bool shouldAcceptNewConnectionHandler(void *listener, void *connection, void *socketDevice);
 
 @interface Observer : NSObject
@@ -33,22 +31,36 @@ void setInitialRamdiskURLVZLinuxBootLoader(void *bootLoaderPtr, const char *ramd
 
 /* VirtualMachineConfiguration */
 bool validateVZVirtualMachineConfiguration(void *config, void **error);
+unsigned long long minimumAllowedMemorySizeVZVirtualMachineConfiguration();
+unsigned long long maximumAllowedMemorySizeVZVirtualMachineConfiguration();
+unsigned int minimumAllowedCPUCountVZVirtualMachineConfiguration();
+unsigned int maximumAllowedCPUCountVZVirtualMachineConfiguration();
 void *newVZVirtualMachineConfiguration(void *bootLoader,
-                                       unsigned int CPUCount,
-                                       unsigned long long memorySize);
+    unsigned int CPUCount,
+    unsigned long long memorySize);
 void setEntropyDevicesVZVirtualMachineConfiguration(void *config,
-                                                    void *entropyDevices);
+    void *entropyDevices);
 void setMemoryBalloonDevicesVZVirtualMachineConfiguration(void *config,
-                                                          void *memoryBalloonDevices);
+    void *memoryBalloonDevices);
 void setNetworkDevicesVZVirtualMachineConfiguration(void *config,
-                                                    void *networkDevices);
+    void *networkDevices);
 void setSerialPortsVZVirtualMachineConfiguration(void *config,
-                                                 void *serialPorts);
+    void *serialPorts);
 void setSocketDevicesVZVirtualMachineConfiguration(void *config,
-                                                   void *socketDevices);
+    void *socketDevices);
 void setStorageDevicesVZVirtualMachineConfiguration(void *config,
-                                                    void *storageDevices);
+    void *storageDevices);
 void setDirectorySharingDevicesVZVirtualMachineConfiguration(void *config, void *directorySharingDevices);
+void setPlatformVZVirtualMachineConfiguration(void *config,
+    void *platform);
+void setGraphicsDevicesVZVirtualMachineConfiguration(void *config,
+    void *graphicsDevices);
+void setPointingDevicesVZVirtualMachineConfiguration(void *config,
+    void *pointingDevices);
+void setKeyboardsVZVirtualMachineConfiguration(void *config,
+    void *keyboards);
+void setAudioDevicesVZVirtualMachineConfiguration(void *config,
+    void *audioDevices);
 
 /* Configurations */
 void *newVZFileHandleSerialPortAttachment(int readFileDescriptor, int writeFileDescriptor);
@@ -76,30 +88,43 @@ void setVZVirtioFileSystemDeviceConfigurationShare(void *config, void *share);
 void *VZVirtualMachine_socketDevices(void *machine);
 void VZVirtioSocketDevice_setSocketListenerForPort(void *socketDevice, void *vmQueue, void *listener, uint32_t port);
 void VZVirtioSocketDevice_removeSocketListenerForPort(void *socketDevice, void *vmQueue, uint32_t port);
-void VZVirtioSocketDevice_connectToPort(void *socketDevice, void *vmQueue, uint32_t port, const char *socketDeviceID);
+void VZVirtioSocketDevice_connectToPort(void *socketDevice, void *vmQueue, uint32_t port, void *cgoHandlerPtr);
+void *newVZUSBScreenCoordinatePointingDeviceConfiguration();
+void *newVZUSBKeyboardConfiguration();
+void *newVZVirtioSoundDeviceConfiguration();
+void setStreamsVZVirtioSoundDeviceConfiguration(void *audioDeviceConfiguration, void *streams);
+void *newVZVirtioSoundDeviceInputStreamConfiguration();
+void *newVZVirtioSoundDeviceHostInputStreamConfiguration(); // use in Go
+void *newVZVirtioSoundDeviceOutputStreamConfiguration();
+void *newVZVirtioSoundDeviceHostOutputStreamConfiguration(); // use in Go
+void *newVZGenericPlatformConfiguration();
 
 void *VZVirtualMachine_memoryBalloonDevices(void *machine);
 void VZVirtioMemoryBalloonDevice_setTargetVirtualMachineMemorySize(void *socketDevice, uint64_t port);
 
 /* VirtualMachine */
-void *newVZVirtualMachineWithDispatchQueue(void *config, void *queue, const char *vmid);
+void *newVZVirtualMachineWithDispatchQueue(void *config, void *queue, void *statusHandler);
 bool requestStopVirtualMachine(void *machine, void *queue, void **error);
-void startWithCompletionHandler(void *machine, void *queue, const char *vmid);
-void pauseWithCompletionHandler(void *machine, void *queue, const char *vmid);
-void resumeWithCompletionHandler(void *machine, void *queue, const char *vmid);
+void startWithCompletionHandler(void *machine, void *queue, void *completionHandler);
+void pauseWithCompletionHandler(void *machine, void *queue, void *completionHandler);
+void resumeWithCompletionHandler(void *machine, void *queue, void *completionHandler);
+void stopWithCompletionHandler(void *machine, void *queue, void *completionHandler);
 bool vmCanStart(void *machine, void *queue);
 bool vmCanPause(void *machine, void *queue);
 bool vmCanResume(void *machine, void *queue);
 bool vmCanRequestStop(void *machine, void *queue);
+bool vmCanStop(void *machine, void *queue);
 
 void *makeDispatchQueue(const char *label);
 
 /* VZVirtioSocketConnection */
-typedef struct VZVirtioSocketConnectionFlat
-{
+typedef struct VZVirtioSocketConnectionFlat {
     uint32_t destinationPort;
     uint32_t sourcePort;
     int fileDescriptor;
 } VZVirtioSocketConnectionFlat;
 
 VZVirtioSocketConnectionFlat convertVZVirtioSocketConnection2Flat(void *connection);
+
+void sharedApplication();
+void startVirtualMachineWindow(void *machine, double width, double height);
