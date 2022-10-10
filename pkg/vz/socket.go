@@ -104,7 +104,7 @@ func connectionHandler(connPtr, errPtr, cgoHandlerPtr unsafe.Pointer) {
 		handler(nil, err)
 	} else {
 		conn := newVirtioSocketConnection(connPtr)
-		handler(conn, nil)
+		go handler(conn, nil)
 	}
 }
 
@@ -153,10 +153,8 @@ func NewVirtioSocketListener(handler func(conn *VirtioSocketConnection, err erro
 		}
 	}()
 	shouldAcceptNewConnectionHandlers[ptr] = func(conn *VirtioSocketConnection) bool {
-		dupConn, err := conn.dup()
 		dupCh <- dup{
-			conn: dupConn,
-			err:  err,
+			conn: conn,
 		}
 		return true // must be connected
 	}
@@ -189,31 +187,43 @@ func shouldAcceptNewConnectionHandler(listenerPtr, connPtr, devicePtr unsafe.Poi
 //
 // see: https://developer.apple.com/documentation/virtualization/vzvirtiosocketconnection?language=objc
 type VirtioSocketConnection struct {
-	id              string
 	sourcePort      uint32
 	destinationPort uint32
 	fileDescriptor  uintptr
 	file            *os.File
 	laddr           net.Addr // local
 	raddr           net.Addr // remote
+
+	objcValue unsafe.Pointer
 }
 
 var _ net.Conn = (*VirtioSocketConnection)(nil)
 
 func newVirtioSocketConnection(ptr unsafe.Pointer) *VirtioSocketConnection {
-	id := xid.New().String()
 	vzVirtioSocketConnection := C.convertVZVirtioSocketConnection2Flat(ptr)
-	err := unix.SetNonblock(int(vzVirtioSocketConnection.fileDescriptor), true)
+	origFD := vzVirtioSocketConnection.fileDescriptor
+
+	// We dup the macos owned fd because when we pass it to NewFile, we're allowing
+	// Go to close(2) the fd, but macos ALSO wants to be able to close(2) it. To prevent
+	// a situation where the same fd is closed twice (which can result in closing a
+	// random different kernel object the second time), we dup the fd here. That
+	// way when Go closes this, all good. And then when macos closes the original one,
+	// still all good.
+	nfd, err := syscall.Dup(int(origFD))
+	if err != nil {
+		panic(err)
+	}
+
+	err = unix.SetNonblock(nfd, true)
 	if err != nil {
 		fmt.Printf("set nonblock: %s\n", err.Error())
 	}
 
 	conn := &VirtioSocketConnection{
-		id:              id,
 		sourcePort:      (uint32)(vzVirtioSocketConnection.sourcePort),
 		destinationPort: (uint32)(vzVirtioSocketConnection.destinationPort),
 		fileDescriptor:  (uintptr)(vzVirtioSocketConnection.fileDescriptor),
-		file:            os.NewFile((uintptr)(vzVirtioSocketConnection.fileDescriptor), id),
+		file:            os.NewFile((uintptr)(nfd), ""),
 		laddr: &Addr{
 			CID:  unix.VMADDR_CID_HOST,
 			Port: (uint32)(vzVirtioSocketConnection.destinationPort),
@@ -222,30 +232,12 @@ func newVirtioSocketConnection(ptr unsafe.Pointer) *VirtioSocketConnection {
 			CID:  unix.VMADDR_CID_HYPERVISOR,
 			Port: (uint32)(vzVirtioSocketConnection.sourcePort),
 		},
+		objcValue: ptr,
 	}
+
+	runtime.SetFinalizer(conn, (*VirtioSocketConnection).Close)
+
 	return conn
-}
-
-func (v *VirtioSocketConnection) dup() (*VirtioSocketConnection, error) {
-	nfd, err := syscall.Dup(int(v.fileDescriptor))
-	if err != nil {
-		return nil, &net.OpError{
-			Op:     "dup",
-			Net:    "vsock",
-			Source: v.laddr,
-			Addr:   v.raddr,
-			Err:    err,
-		}
-	}
-
-	dupConn := new(VirtioSocketConnection)
-	*dupConn = *v
-	dupConn.fileDescriptor = uintptr(nfd)
-	dupConn.file = os.NewFile(uintptr(nfd), v.file.Name())
-	dupConn.laddr = v.laddr
-	dupConn.raddr = v.raddr
-
-	return dupConn, nil
 }
 
 // Read reads data from connection of the vsock protocol.
@@ -256,7 +248,16 @@ func (v *VirtioSocketConnection) Write(b []byte) (n int, err error) { return v.f
 
 // Close will be called when caused something error in socket.
 func (v *VirtioSocketConnection) Close() error {
-	return v.file.Close()
+	if ptr := atomic.SwapPointer(&v.objcValue, nil); ptr != unsafe.Pointer(nil) {
+		runtime.SetFinalizer(v, nil)
+
+		// This will call [release] on the macos value, which if it's the last ref, will
+		// close the fd and clean it up.
+		C.releaseObjc(v.objcValue)
+
+		return v.file.Close()
+	}
+	return nil
 }
 
 // LocalAddr returns the local network address.

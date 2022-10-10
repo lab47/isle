@@ -38,6 +38,7 @@ char *copyCString(NSString *nss)
 @implementation VZVirtioSocketListenerDelegateImpl
 - (BOOL)listener:(VZVirtioSocketListener *)listener shouldAcceptNewConnection:(VZVirtioSocketConnection *)connection fromSocketDevice:(VZVirtioSocketDevice *)socketDevice;
 {
+    [connection retain];
     return (BOOL)shouldAcceptNewConnectionHandler(listener, connection, socketDevice);
 }
 @end
@@ -604,9 +605,14 @@ void VZVirtioSocketDevice_connectToPort(void *socketDevice, void *vmQueue, uint3
     dispatch_sync((dispatch_queue_t)vmQueue, ^{
         [(VZVirtioSocketDevice *)socketDevice connectToPort:port
                                           completionHandler:^(VZVirtioSocketConnection *connection, NSError *err) {
+                                              [connection retain];
                                               connectionHandler(connection, err, cgoHandlerPtr);
                                           }];
     });
+}
+
+void releaseObjc(void *obj) {
+    [(id)obj release];
 }
 
 VZVirtioSocketConnectionFlat convertVZVirtioSocketConnection2Flat(void *connection)

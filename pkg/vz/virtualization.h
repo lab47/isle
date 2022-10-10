@@ -14,6 +14,7 @@ void virtualMachineCompletionHandler(void *cgoHandler, void *errPtr);
 void connectionHandler(void *connection, void *err, void *cgoHandlerPtr);
 void changeStateOnObserver(int state, void *cgoHandler);
 bool shouldAcceptNewConnectionHandler(void *listener, void *connection, void *socketDevice);
+void releaseObjc(void *obj);
 
 @interface Observer : NSObject
 - (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary *)change context:(void *)context;
