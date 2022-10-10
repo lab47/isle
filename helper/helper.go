@@ -280,18 +280,6 @@ var trimCmd TrimCmd
 
 func Main(args []string) {
 	parser := flags.NewNamedParser("isle", flags.Default)
-	parser.AddCommand("install-app",
-		"install an application",
-		"install an application to your isle",
-		&installCmd,
-	)
-
-	parser.AddCommand("remove-app",
-		"remove an application",
-		"remove an application to your isle",
-		&removeCmd,
-	)
-
 	parser.AddCommand("read-logs",
 		"read logs from a clog formatted dir",
 		"read logs from a clog formatted dir",
