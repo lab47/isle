@@ -233,7 +233,7 @@ func main() {
 	named = reference.TagNameOnly(named)
 
 	if *fName == "" {
-		fam := strings.NewReplacer("/", "_", ":", "_").Replace(reference.FamiliarName(named))
+		fam := strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(reference.FamiliarName(named))
 		*fName = fam
 	}
 
