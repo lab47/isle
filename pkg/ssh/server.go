@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"time"
@@ -288,6 +289,8 @@ func (srv *Server) HandleConn(newConn net.Conn) {
 
 	srv.trackConn(sshConn, true)
 	defer srv.trackConn(sshConn, false)
+
+	defer log.Printf("done with server-side ssh")
 
 	ctx.SetValue(ContextKeyConn, sshConn)
 	applyConnMetadata(ctx, sshConn)

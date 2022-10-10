@@ -133,11 +133,26 @@ func (g *Guest) Container(ctx context.Context, info *ContainerInfo) (string, err
 	if len(cont) >= 1 {
 		id := cont[0].ID()
 
-		g.running[info.Name] = &runningContainer{
-			id: id,
+		c, err := g.C.LoadContainer(ctx, id)
+		if err != nil {
+			return "", err
 		}
 
-		return id, nil
+		_, err = c.Task(ctx, nil)
+		if err == nil {
+			g.running[info.Name] = &runningContainer{
+				id: id,
+			}
+
+			return id, nil
+		}
+
+		// There isn't a running task, so delete this one so we create it fresh
+		// with a task.
+		err = c.Delete(ctx)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	started := make(chan string, 1)

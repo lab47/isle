@@ -30,10 +30,12 @@ import (
 
 var Version = "unknown"
 
+const defaultImage = "ghcr.io/lab47/ubuntu:latest"
+
 var (
 	fVersion  = pflag.Bool("version", false, "print out the version")
 	fName     = pflag.StringP("name", "n", "", "name of vm to connect to")
-	fImage    = pflag.StringP("image", "i", "ubuntu", "OCI image to load")
+	fImage    = pflag.StringP("image", "i", defaultImage, "OCI image to load")
 	fDir      = pflag.StringP("dir", "d", "", "directory to start in")
 	fRoot     = pflag.Bool("as-root", false, "establish the shell as root")
 	fStateDir = pflag.String("state-dir", "", "directory that isle stores state in")
@@ -215,7 +217,7 @@ func main() {
 		time.Sleep(3 * time.Second)
 	}
 
-	path := filepath.Join(stateDir, "listen-addr")
+	path := filepath.Join(stateDir, "control.sock")
 	_, err = os.Stat(path)
 	if err != nil {
 		log.Error("error validating state, missing listen-addr", "error", err)
@@ -367,7 +369,7 @@ func startVM(log hclog.Logger, stateDir, configPath, pidPath string) {
 
 		go func() {
 			time.Sleep(5 * time.Second)
-			fmt.Fprintf(w, "\ntail -f /var/log/guest.log\n")
+			fmt.Fprintf(w, "\ntail -f /var/log/isle-guest.log\n")
 		}()
 
 		log = hclog.New(&hclog.LoggerOptions{

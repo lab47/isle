@@ -386,33 +386,6 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 
 	v.memoryBalloon = vm.MemoryBalloonDevices()[0]
 
-	/*
-
-		go func() {
-			for {
-				c, err := l.Accept()
-				if err != nil {
-					return
-				}
-
-				go func() {
-					log.Printf("making connetion to vsock")
-					sock.ConnectToPort(47, func(conn *vz.VirtioSocketConnection, err error) {
-						defer c.Close()
-
-						if err != nil {
-							log.Printf("error making connection: %s", err)
-						} else {
-							log.Printf("connetion made to vsock")
-							go io.Copy(c, conn)
-							io.Copy(conn, c)
-						}
-					})
-				}()
-			}
-		}()
-	*/
-
 	errCh := make(chan error, 1)
 
 	vm.Start(func(err error) {
@@ -499,7 +472,7 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 			if newState == vz.VirtualMachineStateRunning {
 				v.L.Debug("start VM is running")
 
-				listener, err := v.startListener(ctx, ctrlC)
+				listener, err := v.startListener(ctx, ctrlC, sock)
 				if err != nil {
 					return err
 				}
@@ -539,139 +512,31 @@ func (v *VM) cleanup() {
 func (v *VM) startListener(
 	ctx context.Context,
 	ctrlC chan types.ControlMessage,
+	sock *vz.VirtioSocketDevice,
 ) (*vz.VirtioSocketListener, error) {
 	socketPath := filepath.Join(v.StateDir, "control.sock")
 	os.Remove(socketPath)
 
-	l, err := net.Listen("tcp", "127.0.0.1:0")
+	l, err := net.Listen("unix", socketPath)
 	if err != nil {
 		return nil, err
 	}
-
-	f, err := os.Create(filepath.Join(v.StateDir, "listen-addr"))
-	if err != nil {
-		return nil, err
-	}
-
-	fmt.Fprintln(f, l.Addr().String())
-
-	f.Close()
-
-	type newConn struct {
-		conn *vz.VirtioSocketConnection
-		wait chan struct{}
-	}
-
-	connCh := make(chan newConn)
 
 	go func() {
-		var (
-			conn      *vz.VirtioSocketConnection
-			wait      chan struct{}
-			sess      *yamux.Session
-			curHostCh chan net.Conn
-			hostCh    = make(chan net.Conn)
-		)
-
-		go func() {
-			defer l.Close()
-
-			v.L.Info("listening for new sockets on host", "addr", l.Addr())
-
-			for {
-				c, err := l.Accept()
-				if err != nil {
-					if ne, ok := err.(net.Error); ok {
-						if ne.Temporary() || ne.Timeout() {
-							continue
-						}
-					}
-					v.L.Error("error accepting new sockets", "error", err)
-					return
-				}
-
-				v.L.Debug("accepted new client on host side", "addr", c.RemoteAddr())
-
-				hostCh <- c
-			}
-		}()
-
 		for {
 			select {
 			case <-ctx.Done():
 				l.Close()
 				return
-			case ci := <-connCh:
-				if wait != nil {
-					wait <- struct{}{}
-				}
-
-				conn = ci.conn
-				wait = ci.wait
-
-				if sess != nil {
-					sess.Close()
-				}
-
-				cfg := yamux.DefaultConfig()
-				cfg.EnableKeepAlive = true
-				cfg.AcceptBacklog = 10
-
-				sess, _ = yamux.Client(conn, cfg)
-				v.L.Debug("connected yamux to guest")
-
-				// This will make it so now we start to recieve any socket connections
-				// from the CLI
-				curHostCh = hostCh
-
-				v.mu.Lock()
-				v.currentSession = sess
-				v.mu.Unlock()
-
-				go v.timesync(ctx, sess)
-				go v.handleFromGuest(ctx, sess)
-			case c := <-curHostCh:
-				if sess == nil {
-					v.L.Error("attempted connection to session before started")
-					c.Close()
-					continue
-				}
-
-				v.L.Info("starting bridge...", "conn", c.RemoteAddr())
-
-				out, err := sess.Open()
-				if err != nil {
-					v.L.Error("error opening for yamux", "error", err)
-					c.Close()
-					continue
-				}
-
-				v.L.Info("bridging connection...")
-
-				go func() {
-					defer c.Close()
-					defer out.Close()
-
-					_, err := io.Copy(out, c)
-					v.L.Info("closing down bridge 1", "error", err)
-				}()
-
-				go func() {
-					defer c.Close()
-					defer out.Close()
-
-					_, err := io.Copy(c, out)
-					v.L.Info("closing down bridge 2", "error", err)
-				}()
 			case msg := <-ctrlC:
 				v.L.Debug("sending control message")
 
-				if sess == nil {
+				if v.currentSession == nil {
 					v.L.Warn("attempted to send control message before connection was made")
 					continue
 				}
 
-				out, err := sess.Open()
+				out, err := v.currentSession.Open()
 				if err != nil {
 					v.L.Error("error opening session for control", "error", err)
 					continue
@@ -698,23 +563,81 @@ func (v *VM) startListener(
 		}
 	}()
 
+	var prevConn *vz.VirtioSocketConnection
+
 	listener := vz.NewVirtioSocketListener(func(conn *vz.VirtioSocketConnection, err error) {
 		if err != nil {
 			return
 		}
 
-		defer conn.Close()
+		if prevConn != nil {
+			prevConn.Close()
+		}
 
-		v.L.Info("connection from virtio socket detected")
+		prevConn = conn
 
-		wait := make(chan struct{})
+		cfg := yamux.DefaultConfig()
+		cfg.EnableKeepAlive = true
+		cfg.AcceptBacklog = 10
 
-		connCh <- newConn{conn, wait}
+		sess, err := yamux.Client(conn, cfg)
+		v.L.Debug("connected yamux to guest")
 
-		<-wait
+		v.mu.Lock()
+
+		if v.currentSession != nil {
+			v.currentSession.Close()
+		}
+
+		v.currentSession = sess
+		v.mu.Unlock()
+
+		go v.timesync(ctx, sess)
+		go v.handleFromGuest(ctx, sess)
+		go v.standaloneBridge(ctx, sock, l)
+
+		return
 	})
 
 	return listener, nil
+}
+
+func (v *VM) bridge(sock *vz.VirtioSocketDevice, c net.Conn) {
+	v.L.Info("starting ssh bridge")
+
+	sock.ConnectToPort(48, func(conn *vz.VirtioSocketConnection, err error) {
+		if err != nil {
+			v.L.Error("error connecting to port", "error", err)
+			c.Close()
+			return
+		}
+
+		v.L.Info("bridging connection", "guest-port", 48)
+
+		go func() {
+			defer c.Close()
+			defer conn.Close()
+
+			io.Copy(conn, c)
+		}()
+
+		defer c.Close()
+		defer conn.Close()
+
+		io.Copy(c, conn)
+	})
+}
+
+func (v *VM) standaloneBridge(ctx context.Context, sock *vz.VirtioSocketDevice, l net.Listener) {
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			v.L.Error("error listening for bridge connections", "error", err)
+			return
+		}
+
+		go v.bridge(sock, c)
+	}
 }
 
 func (v *VM) timesync(ctx context.Context, sess *yamux.Session) {

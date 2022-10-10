@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -23,7 +24,6 @@ import (
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
-	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -34,11 +34,13 @@ import (
 	"github.com/lab47/isle/pkg/reaper"
 	"github.com/lab47/isle/pkg/ssh"
 	"github.com/lab47/isle/pkg/timesync"
+	"github.com/lab47/isle/pkg/xuser"
 	"github.com/lab47/isle/types"
 	"github.com/opencontainers/image-spec/identity"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/xid"
 	"go.etcd.io/bbolt"
+	"golang.org/x/exp/slices"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 
@@ -232,13 +234,18 @@ func (g *Guest) Cleanup(ctx context.Context) {
 	for _, r := range g.running {
 		g.L.Info("signaling shutdown of container", "id", r.id)
 
-		r.cancel()
-		select {
-		case <-r.doneCh:
-			g.L.Info("container stopped", "id", r.id)
-			// ok
-		case <-ctx.Done():
-			return
+		if r.cancel != nil {
+			r.cancel()
+		}
+
+		if r.doneCh != nil {
+			select {
+			case <-r.doneCh:
+				g.L.Info("container stopped", "id", r.id)
+				// ok
+			case <-ctx.Done():
+				return
+			}
 		}
 
 		g.CleanupContainer(ctx, r.id)
@@ -259,6 +266,30 @@ func (g *Guest) Cleanup(ctx context.Context) {
 
 	g.bgCancel()
 	g.wg.Wait()
+}
+
+func (g *Guest) fsPath(info *ContainerInfo, parts ...string) string {
+	name := info.Name
+
+	bundlePath := filepath.Join(basePath, name)
+	rootFsPath := filepath.Join(bundlePath, "rootfs")
+
+	callSlice := append([]string{rootFsPath}, parts...)
+
+	return filepath.Join(callSlice...)
+}
+
+func (g *Guest) hasGroup(info *ContainerInfo, gid string) bool {
+	name := info.Name
+
+	bundlePath := filepath.Join(basePath, name)
+	rootFsPath := filepath.Join(bundlePath, "rootfs")
+
+	groupFile := filepath.Join(rootFsPath, "etc", "group")
+
+	_, err := xuser.LookupGroupId(groupFile, gid)
+
+	return err == nil
 }
 
 func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) {
@@ -299,7 +330,7 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 
 	if info.Image == "" {
 		g.L.Warn("no image set, defaulting to ubuntu")
-		info.Image = "docker.io/library/ubuntu:latest"
+		info.Image = "ghcr.io/lab47/ubuntu:latest"
 
 		if info.Name == "" {
 			info.Name = "ubuntu"
@@ -308,7 +339,7 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 
 	if info.Name == "" {
 		g.L.Warn("name not set, defaulting to msl")
-		info.Name = "msl"
+		info.Name = "ubuntu"
 	}
 
 	imgref, err := name.ParseReference(info.Image)
@@ -370,10 +401,22 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		sp.User.UID = 501
 		sp.User.GID = 1000
 		sp.User.Username = g.User
-		// This is a convience because docker uses 999 as it's gid, and setting
-		// this up now makes it possible for a user to install docker and have
-		// it just work, perms wise.
-		sp.User.AdditionalGids = append(sp.User.AdditionalGids, 999)
+
+		groups, err := xuser.LookupAdditionalGroups(g.fsPath(&cinfo, "etc", "group"), g.User)
+		if err == nil {
+			for _, grp := range groups {
+				if gid, err := strconv.Atoi(grp.Gid); err == nil {
+					sp.User.AdditionalGids = append(sp.User.AdditionalGids, uint32(gid))
+				}
+			}
+		}
+
+		if !slices.Contains(sp.User.AdditionalGids, 999) && g.hasGroup(&cinfo, "999") {
+			// This is a convience because docker uses 999 as it's gid, and setting
+			// this up now makes it possible for a user to install docker and have
+			// it just work, perms wise.
+			sp.User.AdditionalGids = append(sp.User.AdditionalGids, 999)
+		}
 
 		if sp.Cwd == "" {
 			sp.Cwd = "/home/" + g.User
@@ -508,10 +551,63 @@ func (g *Guest) setupSnapshot(ctx context.Context, id string, i containerd.Image
 	return snapId, nil
 }
 
+func (g *Guest) HandleSSH(ctx context.Context, c net.Conn) {
+	var key *rsa.PrivateKey
+
+	var data []byte
+
+	err := g.getVar("ssh-key", &data)
+	if err == nil {
+		key, _ = x509.ParsePKCS1PrivateKey(data)
+	}
+
+	if key == nil {
+		key, err = rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			return
+		}
+
+		err = g.setVar("ssh-key", x509.MarshalPKCS1PrivateKey(key))
+		if err != nil {
+			return
+		}
+	}
+
+	signer, err := gossh.NewSignerFromKey(key)
+	if err != nil {
+		return
+	}
+
+	sshServ := &ssh.Server{
+		HostSigners: []ssh.Signer{signer},
+		Handler: func(s ssh.Session) {
+			g.handleSSH(ctx, s, g.currentSession)
+		},
+		ConnectionFailedCallback: func(conn net.Conn, err error) {
+			g.L.Error("failed to negotation ssh", "error", err)
+		},
+	}
+
+	sshServ.RequestHandlers = map[string]ssh.RequestHandler{}
+	for k, v := range ssh.DefaultRequestHandlers {
+		sshServ.RequestHandlers[k] = v
+	}
+
+	sshServ.ChannelHandlers = map[string]ssh.ChannelHandler{}
+	for k, v := range ssh.DefaultChannelHandlers {
+		sshServ.ChannelHandlers[k] = v
+	}
+
+	sshServ.SubsystemHandlers = map[string]ssh.SubsystemHandler{}
+	for k, v := range ssh.DefaultSubsystemHandlers {
+		sshServ.SubsystemHandlers[k] = v
+	}
+
+	sshServ.HandleConn(c)
+}
+
 func (g *Guest) Run(ctx context.Context, l *yamux.Session) error {
 	g.currentSession = l
-
-	ctx = namespaces.WithNamespace(ctx, "isle")
 
 	var key *rsa.PrivateKey
 

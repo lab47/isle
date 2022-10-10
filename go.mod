@@ -35,7 +35,7 @@ require (
 	github.com/opencontainers/image-spec v1.0.3-0.20211215212317-ea0209f50ae1
 	github.com/opencontainers/runtime-spec v1.0.3-0.20211214071223-8958f93039ab
 	github.com/pkg/errors v0.9.1
-	github.com/rs/xid v1.3.0
+	github.com/rs/xid v1.4.0
 	github.com/schollz/progressbar/v3 v3.8.6
 	github.com/sirupsen/logrus v1.8.1
 	github.com/spf13/pflag v1.0.5
@@ -45,6 +45,7 @@ require (
 	github.com/zclconf/go-cty v1.8.0
 	go.etcd.io/bbolt v1.3.6
 	golang.org/x/crypto v0.0.0-20220919173607-35f4265a4bc0
+	golang.org/x/exp v0.0.0-20221006183845-316c7553db56
 	golang.org/x/sys v0.0.0-20220919091848-fb04ddd9f9c8
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
 	google.golang.org/grpc v1.44.0
@@ -76,7 +77,7 @@ require (
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.2 // indirect
-	github.com/google/go-cmp v0.5.7 // indirect
+	github.com/google/go-cmp v0.5.8 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/google/uuid v1.3.0 // indirect
 	github.com/googleapis/gax-go/v2 v2.1.0 // indirect

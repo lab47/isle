@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/containerd/containerd/namespaces"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
 	"github.com/lab47/isle/guest"
@@ -44,6 +45,8 @@ func main() {
 	)
 	defer cancel()
 
+	ctx = namespaces.WithNamespace(ctx, "isle")
+
 	err := g.Init(ctx)
 	if err != nil {
 		g.L.Error("error initializing guest", "error", err)
@@ -64,10 +67,18 @@ func main() {
 
 	g.L.Info("detected user name", "name", vars["user_name"])
 
+	vcfg := &vsock.Config{}
+
+	vl, err := vsock.Listen(48, nil)
+	if err != nil {
+		g.L.Error("error listening on vsock 48", "error", err)
+		os.Exit(1)
+	}
+
+	go handleListen(ctx, g, vl)
+
 	for {
 		g.L.Info("connecting to host")
-
-		vcfg := &vsock.Config{}
 
 		c, err := vsock.Dial(vsock.Host, 47, vcfg)
 		if err != nil {
@@ -88,6 +99,19 @@ func main() {
 	defer cancel()
 
 	g.Cleanup(ctx)
+}
+
+func handleListen(ctx context.Context, g *guest.Guest, l net.Listener) {
+	for {
+		c, err := l.Accept()
+		if err != nil {
+			g.L.Error("error listening for vsock connections", "error", err)
+			return
+		}
+		g.L.Info("accepted vsock")
+
+		go g.HandleSSH(ctx, c)
+	}
 }
 
 func handleConn(ctx context.Context, g *guest.Guest, c net.Conn) bool {

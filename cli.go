@@ -34,12 +34,6 @@ type CLI struct {
 }
 
 func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
-	var (
-		sc    ssh.Conn
-		chans <-chan ssh.NewChannel
-		reqs  <-chan *ssh.Request
-	)
-
 	var cfg ssh.ClientConfig
 	cfg.HostKeyCallback = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		return nil
@@ -47,9 +41,11 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 	cfg.SetDefaults()
 
 	var (
-		conn net.Conn
-		err  error
+		sconn *ssh.Client
+		err   error
 	)
+
+	c.L.Info("connecting to local socket")
 
 	for i := 0; i < 100; i++ {
 		if c.IsTerm {
@@ -57,44 +53,20 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 				aec.EmptyBuilder.Column(0).ANSI.String(),
 			)
 		}
-
-		c.L.Info("connecting to local socket")
-		addr, err := ioutil.ReadFile(c.Path)
-		if err != nil {
-			return err
+		sconn, err = ssh.Dial("unix", c.Path, &cfg)
+		if err == nil {
+			break
 		}
 
-		conn, err = net.Dial("tcp", strings.TrimSpace(string(addr)))
-		/*
-			conn, err = net.DialUnix("unix", nil, &net.UnixAddr{
-				Name: c.Path,
-				Net:  "unix",
-			})
-		*/
-		if err != nil {
-			c.L.Error("error connecting to unixsocket", "error", err)
-			time.Sleep(time.Second)
-			continue
-		}
-
-		c.L.Info("negotiating ssh")
-
-		sc, chans, reqs, err = ssh.NewClientConn(conn, "vsock", &cfg)
-		if err != nil {
-			c.L.Debug("issue negotiating ssh connection, trying again")
-			conn.Close()
-			time.Sleep(time.Second)
-			continue
-		}
-
-		break
+		c.L.Error("error connecting to unixsocket", "error", err)
+		time.Sleep(time.Second)
 	}
 
-	c.L.Info("connect via ssh", "remote-addr", conn.RemoteAddr())
-
-	sconn := ssh.NewClient(sc, chans, reqs)
-
 	sess, err := sconn.NewSession()
+	if err != nil {
+		c.L.Error("error creating new session", "error", err)
+		return err
+	}
 
 	sess.Stdout = stdout
 	sess.Stderr = stdout
@@ -104,7 +76,7 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 
 	hostname, err := os.Hostname()
 	if err != nil {
-		hostname = "msl"
+		hostname = "isle"
 	} else {
 		idx := strings.IndexByte(hostname, '.')
 		if idx != -1 {
