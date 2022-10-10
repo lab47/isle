@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/coreos/go-iptables/iptables"
 	"github.com/hashicorp/go-hclog"
 
 	current "github.com/containernetworking/cni/pkg/types/100"
@@ -163,11 +164,6 @@ func setupBridge(n *BridgeConfig) (*netlink.Bridge, *current.Interface, error) {
 	br, err := ensureBridge(n.Name, n.MTU, n.PromiscMode, vlanFiltering)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create bridge %q: %w", n.Name, err)
-	}
-
-	err = ensureAddr(br, netlink.FAMILY_V4, metadataNet, false)
-	if err != nil {
-		return nil, nil, fmt.Errorf("error setting up metadata ip: %w", err)
 	}
 
 	return br, &current.Interface{
@@ -435,6 +431,8 @@ func SettleAddresses(ifName string, timeout int) error {
 }
 
 func configureGW(br netlink.Link, addresses []NetworkConfig) error {
+	var natIP string
+
 	for _, ac := range addresses {
 		gwIP := &net.IPNet{
 			IP:   ip.NextIP(ac.Address.IP.Mask(ac.Address.Mask)),
@@ -445,6 +443,7 @@ func configureGW(br netlink.Link, addresses []NetworkConfig) error {
 
 		if gwIP.IP.To4() != nil {
 			family = netlink.FAMILY_V4
+			natIP = gwIP.IP.String()
 		} else {
 			family = netlink.FAMILY_V6
 		}
@@ -464,7 +463,20 @@ func configureGW(br netlink.Link, addresses []NetworkConfig) error {
 		}
 	}
 
-	return nil
+	ipt, err := iptables.NewWithProtocol(iptables.ProtocolIPv4)
+	if err != nil {
+		return err
+	}
+
+	if natIP == "" {
+		return nil
+	}
+
+	return ipt.AppendUnique(
+		"nat", "PREROUTING",
+		"-d", MetadataIP, "-j", "DNAT",
+		"--to-destination", natIP,
+	)
 }
 
 func ensureAddr(br netlink.Link, family int, ipn *net.IPNet, forceAddress bool) error {
