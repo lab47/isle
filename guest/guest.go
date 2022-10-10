@@ -31,7 +31,6 @@ import (
 	"github.com/hashicorp/yamux"
 	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/network"
-	"github.com/lab47/isle/pkg/reaper"
 	"github.com/lab47/isle/pkg/ssh"
 	"github.com/lab47/isle/pkg/timesync"
 	"github.com/lab47/isle/pkg/xuser"
@@ -80,8 +79,6 @@ type Guest struct {
 	running      map[string]*runningContainer
 	apps         map[string]*runningContainer
 	detectedApps map[string]string
-
-	reaper *reaper.Monitor
 
 	sshAgentPath string
 
@@ -190,29 +187,8 @@ func (g *Guest) Init(ctx context.Context) error {
 		StartDNS(ctx, g.L)
 	}()
 
-	err = reaper.SetSubreaper(1)
-	if err != nil {
-		return err
-	}
-
-	g.reaper = reaper.Default
-
 	sigc := make(chan os.Signal, 128)
 	signal.Notify(sigc, unix.SIGCHLD)
-
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-sigc:
-				err := reaper.Reap()
-				if err != nil {
-					g.L.Error("error reaping child processes", "error", err)
-				}
-			}
-		}
-	}()
 
 	g.sshAgentPath = "/run/ssh-agent-host.sock"
 

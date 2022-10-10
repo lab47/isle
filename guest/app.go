@@ -2,18 +2,15 @@ package guest
 
 import (
 	"context"
+	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/go-containerregistry/pkg/name"
-	"github.com/lab47/isle/pkg/clog"
-	"github.com/lab47/isle/pkg/runc"
 	"github.com/lab47/isle/pkg/shardconfig"
-	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	"github.com/rs/xid"
 )
@@ -243,175 +240,5 @@ func (g *Guest) StartApp(ctx context.Context, path string, cfg *shardconfig.Conf
 }
 
 func (g *Guest) runApp(ctx context.Context, bundlePath string, info ContainerInfo, cfg *shardconfig.Config, id string) error {
-	r := runc.Runc{
-		Debug: true,
-	}
-
-	started := make(chan int, 1)
-
-	tmpdir, err := ioutil.TempDir("", "isle")
-	if err != nil {
-		return err
-	}
-
-	defer os.RemoveAll(tmpdir)
-
-	pidPath := filepath.Join(tmpdir, "pid")
-
-	dw, err := clog.NewDirectoryWriter(filepath.Join(bundlePath, "log"), 0, 0)
-	if err != nil {
-		return err
-	}
-
-	defer dw.Close()
-
-	appData, err := dw.IOInput(ctx)
-	if err != nil {
-		return err
-	}
-
-	pio, err := runc.SetOutputIO(appData)
-	if err != nil {
-		return err
-	}
-
-	sp := &specs.Process{
-		Env: []string{
-			"PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/run/share/bin:/run/share/sbin:/opt/isle/bin",
-			"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
-		},
-	}
-
-	root := append([]string{}, info.OCIConfig.Entrypoint...)
-
-	sp.Args = append(root, cfg.Service[0].Command...)
-	sp.Cwd = "/"
-
-	ch := g.reaper.Subscribe()
-	defer g.reaper.Unsubscribe(ch)
-
-	errCh := make(chan error)
-
-	err = r.Exec(ctx, id, *sp, &runc.ExecOpts{
-		IO:      pio,
-		Detach:  true,
-		Started: started,
-		PidFile: pidPath,
-	})
-
-	g.L.Debug("exec finished in detach mode")
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case err := <-errCh:
-		return err
-	case <-started:
-		// ok
-	}
-
-	g.L.Info("reading pid file")
-
-	data, err := ioutil.ReadFile(pidPath)
-	if err != nil {
-		return err
-	}
-
-	processPid, err := strconv.Atoi(string(data))
-	if err != nil {
-		return err
-	}
-
-	g.L.Info("checking advertisement", "count", cfg.Advertisements)
-
-	for _, ad := range cfg.Advertisements {
-		for _, rp := range ad.RunPaths {
-			name := rp.Name
-
-			// We change the permissions of the file so that it can be used
-			// by a non-root user in another container (this is typical for
-			// when a service like docker runs as root and the docker.sock
-			// is thusly owned by root but we want it to be usable by other
-			// containers as non-root
-
-			for i := 0; i < 100; i++ {
-				err = os.Chown(filepath.Join("/run", id, name), 501, 1000)
-				if err == nil {
-					break
-				}
-				if os.IsNotExist(err) {
-					g.L.Info("/run file advertiments missing, sleeping and retrying", "name", name)
-					time.Sleep(250 * time.Millisecond)
-				}
-			}
-
-			g.L.Info("adding /run advertisement", "name", name)
-
-			id := g.adverts.Add(&AdvertiseRun{
-				Source: id,
-				Name:   name,
-			})
-
-			defer g.adverts.Remove(id)
-		}
-
-		for _, gp := range ad.Paths {
-			path := filepath.Join("/run", "share", gp.Into, gp.Name)
-
-			if _, err := os.Stat(path); err == nil {
-				g.L.Info("unable to advertise to existing path", "path", path)
-				continue
-			}
-
-			err = os.MkdirAll(filepath.Dir(path), 0755)
-			if err != nil {
-				g.L.Error("error creating shared dir", "dir", filepath.Base(path))
-				continue
-			}
-
-			varName := filepath.Join("/var/isle-containers", info.Name, "rootfs", gp.Path)
-			g.L.Info("mapping advertised path", "from", varName, "to", path)
-
-			err = os.Symlink(varName, path)
-			if err != nil {
-				g.L.Error("error symlinking into shared", "name", gp.Name, "path", gp.Path)
-				continue
-			}
-
-			defer func() {
-				err := os.Remove(path)
-				if err != nil {
-					g.L.Error("error removing shared path", "path", path)
-				} else {
-					os.RemoveAll(path)
-				}
-			}()
-		}
-	}
-
-	var exitStatus runc.Exit
-
-	g.L.Info("waiting on exit status")
-
-loop:
-	for {
-		select {
-		case <-ctx.Done():
-			g.L.Info("exit app management due to context closure")
-			return ctx.Err()
-		case exit := <-ch:
-			if exit.Pid == processPid {
-				g.L.Info("exit detected", "pid", exit.Pid, "pidfile", processPid)
-
-				exitStatus = exit
-				break loop
-			}
-		}
-	}
-
-	code := exitStatus.Status
-
-	g.L.Info("session has exitted", "code", code)
-
-	return nil
+	return io.EOF
 }
