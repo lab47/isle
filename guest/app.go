@@ -249,7 +249,7 @@ func (g *Guest) runApp(ctx context.Context, bundlePath string, info ContainerInf
 
 	started := make(chan int, 1)
 
-	tmpdir, err := ioutil.TempDir("", "yalrm4")
+	tmpdir, err := ioutil.TempDir("", "isle")
 	if err != nil {
 		return err
 	}
