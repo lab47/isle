@@ -34,7 +34,7 @@ const defaultImage = "ghcr.io/lab47/ubuntu:latest"
 
 var (
 	fVersion  = pflag.Bool("version", false, "print out the version")
-	fName     = pflag.StringP("name", "n", "isle", "name of vm to connect to")
+	fName     = pflag.StringP("name", "n", "", "name of vm to connect to")
 	fImage    = pflag.StringP("image", "i", defaultImage, "OCI image to load")
 	fDir      = pflag.StringP("dir", "d", "", "directory to start in")
 	fRoot     = pflag.Bool("as-root", false, "establish the shell as root")
@@ -234,9 +234,16 @@ func main() {
 	named = reference.TagNameOnly(named)
 
 	if *fName == "" {
-		fam := strings.NewReplacer("/", "_", ":", "_", ".", "_").Replace(reference.FamiliarName(named))
-		*fName = fam
+		// See if there is a recently used name
+		data, err := ioutil.ReadFile(filepath.Join(stateDir, "recent"))
+		if err == nil {
+			*fName = strings.TrimSpace(string(data))
+		} else {
+			*fName = "isle"
+		}
 	}
+
+	ioutil.WriteFile(filepath.Join(stateDir, "recent"), []byte(*fName+"\n"), 0644)
 
 	c := &isle.CLI{
 		L:       log,
