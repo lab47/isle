@@ -23,11 +23,12 @@ import (
 )
 
 type CLI struct {
-	Name   string
-	Image  string
-	Dir    string
-	AsRoot bool
-	IsTerm bool
+	Name    string
+	Image   string
+	Dir     string
+	AsRoot  bool
+	IsTerm  bool
+	Console bool
 
 	L    hclog.Logger
 	Path string
@@ -103,6 +104,10 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 			return err
 		}
 		sess.Setenv("_MSL_INFO", string(data))
+	}
+
+	if c.Console {
+		sess.Setenv("ISLE_CONSOLE", "1")
 	}
 
 	if lang := os.Getenv("LANG"); lang != "" {

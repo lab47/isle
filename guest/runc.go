@@ -96,6 +96,32 @@ func idToMac(id string) string {
 	return hwaddr.String()
 }
 
+func (g *Guest) deleteContainer(ctx context.Context, name string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	rc, ok := g.running[name]
+	if ok {
+		rc.cancel()
+		delete(g.running, name)
+	}
+
+	cont, err := g.C.Containers(ctx, "labels.name=="+name)
+	if err != nil {
+		return err
+	}
+
+	if len(cont) < 1 {
+		return nil
+	}
+
+	g.CleanupContainer(ctx, cont[0].ID())
+
+	bundlePath := filepath.Join(basePath, name)
+
+	return os.RemoveAll(bundlePath)
+}
+
 func (g *Guest) CleanupContainer(ctx context.Context, id string) {
 	cont, err := g.C.LoadContainer(ctx, id)
 	if err == nil {

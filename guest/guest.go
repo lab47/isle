@@ -288,7 +288,14 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		},
 	}
 
+	var console bool
+
 	for _, str := range s.Environ() {
+		if str == "ISLE_CONSOLE=1" {
+			console = true
+			continue
+		}
+
 		idx := strings.IndexByte(str, '=')
 		if idx != -1 {
 			key := str[:idx]
@@ -302,6 +309,11 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		}
 
 		sp.Env = append(sp.Env, str)
+	}
+
+	if console {
+		g.runConsole(ctx, s)
+		return
 	}
 
 	if info.Image == "" {

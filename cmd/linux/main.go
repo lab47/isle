@@ -44,6 +44,7 @@ var (
 	fBgStart  = pflag.Bool("bg-start", false, "used to start vm in background")
 	fConfig   = pflag.Bool("configure", false, "configure isle")
 	fStop     = pflag.Bool("stop", false, "stop the background VM")
+	fConsole  = pflag.BoolP("console", "C", false, "Access the Isle Console")
 )
 
 func main() {
@@ -238,13 +239,14 @@ func main() {
 	}
 
 	c := &isle.CLI{
-		L:      log,
-		Path:   path,
-		Image:  named.String(),
-		Name:   *fName,
-		Dir:    *fDir,
-		AsRoot: *fRoot,
-		IsTerm: isTerm,
+		L:       log,
+		Path:    path,
+		Image:   named.String(),
+		Name:    *fName,
+		Dir:     *fDir,
+		AsRoot:  *fRoot,
+		IsTerm:  isTerm,
+		Console: *fConsole,
 	}
 
 	err = c.Shell(strings.Join(pflag.Args(), " "), os.Stdin, os.Stdout)
