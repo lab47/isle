@@ -1,6 +1,7 @@
 package guest
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -259,19 +260,33 @@ func (g *Guest) ociUnpacker(info *ContainerInfo) error {
 		bar.RenderBlank()
 
 		for i, l := range layers {
-			r, err := l.Uncompressed()
+			err := func() error {
+				r, err := l.Compressed()
+				if err != nil {
+					return err
+				}
+
+				defer r.Close()
+
+				gr, err := gzip.NewReader(io.TeeReader(r, bar))
+				if err != nil {
+					return err
+				}
+
+				defer gr.Close()
+
+				sz, err := archive.Apply(ctx, rootFsPath, gr)
+				if err != nil {
+					return err
+				}
+
+				g.L.Info("unpacked layer for image", "image", info.Img.Name(), "layer", i, "size", sz)
+				return nil
+			}()
+
 			if err != nil {
 				return err
 			}
-
-			defer r.Close()
-
-			sz, err := archive.Apply(ctx, rootFsPath, io.TeeReader(r, bar))
-			if err != nil {
-				return err
-			}
-
-			g.L.Info("unpacked layer for image", "image", info.Img.Name(), "layer", i, "size", sz)
 		}
 
 		bar.Finish()
