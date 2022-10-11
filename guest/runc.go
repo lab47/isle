@@ -297,6 +297,10 @@ func (g *Guest) ociUnpacker(info *ContainerInfo) error {
 	return nil
 }
 
+type isleInfo struct {
+	Image string `json:"image"`
+}
+
 type devEntry struct {
 	name         string
 	major, minor int
@@ -349,7 +353,18 @@ func (g *Guest) StartContainer(
 		}
 	}
 
-	err := ioutil.WriteFile(
+	f, err := os.Create(filepath.Join(bundlePath, "info.json"))
+	if err != nil {
+		return err
+	}
+
+	json.NewEncoder(f).Encode(&isleInfo{
+		Image: info.Img.Name(),
+	})
+
+	f.Close()
+
+	err = ioutil.WriteFile(
 		filepath.Join(bundlePath, "resolv.conf"),
 		[]byte(fmt.Sprintf("nameserver %s\n", g.hostAddr)), 0644)
 	if err != nil {
