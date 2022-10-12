@@ -323,6 +323,10 @@ func (g *Guest) ociUnpacker(info *ContainerInfo) error {
 	return nil
 }
 
+func intptr(v int64) *int64 {
+	return &v
+}
+
 type isleInfo struct {
 	Image string `json:"image"`
 }
@@ -335,6 +339,7 @@ type devEntry struct {
 var devCharEntries = []devEntry{
 	{"null", 1, 3},
 	{"full", 1, 7},
+	{"ptmx", 5, 2},
 	{"random", 1, 8},
 	{"urandom", 1, 9},
 	{"tty", 5, 0},
@@ -488,6 +493,12 @@ func (g *Guest) StartContainer(
 				Options:     []string{"nosuid", "noexec", "nodev"},
 			},
 			{
+				Destination: "/dev/kmsg",
+				Type:        "bind",
+				Source:      "/dev/kmsg",
+				Options:     []string{"rbind", "rshared", "rw"},
+			},
+			{
 				Destination: "/sys",
 				Type:        "sysfs",
 				Source:      "sysfs",
@@ -578,6 +589,14 @@ func (g *Guest) StartContainer(
 					{
 						Allow:  true,
 						Access: "rwm",
+					},
+					{
+						// "/dev/kmsg",
+						Type:   "c",
+						Major:  intptr(1),
+						Minor:  intptr(3),
+						Access: "rwm",
+						Allow:  true,
 					},
 				},
 			},
