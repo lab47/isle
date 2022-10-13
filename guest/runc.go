@@ -732,19 +732,27 @@ func (g *Guest) StartContainer(
 		))
 	}
 
+	shell := "/bin/sh"
+
+	if _, err := os.Stat(g.fsPath(info, "bin", "bash")); err == nil {
+		shell = "/bin/bash"
+	}
+
 	if info.Config == nil || info.Config.Service == nil {
 		setup = append(setup,
 			"mkdir -p /etc/sudoers.d",
 			"echo '%user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/00-%user",
 			"echo root:root | chpasswd",
-			"id evan || useradd -u 501 -m %user || adduser -u 501 -h /home/%user %user",
+			"id %user || useradd -u 501 -s %shell -m %user",
 			"echo %user:%user | chpasswd",
 			"stat /home/%user/mac || ln -sf /share/home /home/%user/mac",
 		)
 	}
 
+	repl := strings.NewReplacer("%user", g.User, "%shell", shell)
+
 	for i, str := range setup {
-		setup[i] = strings.ReplaceAll(str, "%user", g.User)
+		setup[i] = repl.Replace(str)
 	}
 
 	var setupSp specs.Process

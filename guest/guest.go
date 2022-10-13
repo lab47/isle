@@ -271,14 +271,6 @@ func (g *Guest) hasGroup(info *ContainerInfo, gid string) bool {
 func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) {
 	g.L.Info("handling ssh")
 
-	cmdline := s.Command()
-
-	if len(cmdline) == 0 {
-		cmdline = []string{"bash", "-l"}
-	}
-
-	g.L.Info("start ssh session", "command", cmdline)
-
 	var info types.MSLInfo
 
 	sp := &specs.Process{
@@ -380,14 +372,40 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		return
 	}
 
-	sp.Args = cmdline
 	if info.Dir != "" {
 		sp.Cwd = info.Dir
 	}
 
-	if !info.AsRoot {
-		sp.User.UID = 501
-		sp.User.GID = 1000
+	cmdline := s.Command()
+
+	if info.AsRoot {
+		sp.User.Username = "root"
+
+		if sp.Cwd == "" {
+			sp.Cwd = "/root"
+		}
+	} else {
+		u, err := xuser.LookupUser(g.fsPath(&cinfo, "etc", "passwd"), g.User)
+		if err != nil {
+			g.L.Error("error using user", "error", err)
+			fmt.Fprintf(s, "error establishing connection as user: %s", err)
+			s.Exit(1)
+			return
+		}
+
+		if uid, err := strconv.Atoi(u.Uid); err == nil {
+			sp.User.UID = uint32(uid)
+		} else {
+			// bad fallback but... ?
+			sp.User.UID = 501
+		}
+
+		if gid, err := strconv.Atoi(u.Gid); err == nil {
+			sp.User.GID = uint32(gid)
+		} else {
+			sp.User.GID = 1000
+		}
+
 		sp.User.Username = g.User
 
 		groups, err := xuser.LookupAdditionalGroups(g.fsPath(&cinfo, "etc", "group"), g.User)
@@ -407,14 +425,34 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		}
 
 		if sp.Cwd == "" {
-			sp.Cwd = "/home/" + g.User
+			sp.Cwd = u.HomeDir
 		}
 
-	} else {
-		if sp.Cwd == "" {
-			sp.Cwd = "/root"
+		if len(cmdline) == 0 && u.Shell != "" {
+			// containerd doesn't give us a way to specify the command to run
+			// AND set the argv0 specially, which is what is required to set the
+			// first character to - as is the unix way to specify a login shell.
+			// As such, we're going to use the (mostly universal) convention of
+			// passing -l to mean login
+			cmdline = []string{u.Shell, "-l"}
 		}
 	}
+
+	if len(cmdline) == 0 {
+		// See if there is bash to use rather than using /bin/sh
+		// (which on ubuntu is a link to dash and isn't a great shell)
+
+		_, err := os.Stat(g.fsPath(&cinfo, "bin", "bash"))
+		if err == nil {
+			cmdline = []string{"/bin/bash", "-l"}
+		} else {
+			cmdline = []string{"/bin/sh", "-l"}
+		}
+	}
+
+	g.L.Info("start ssh session", "command", cmdline)
+
+	sp.Args = cmdline
 
 	client := g.C
 

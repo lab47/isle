@@ -43,6 +43,9 @@ type User struct {
 	Name string
 	// HomeDir is the path to the user's home directory (if they have one).
 	HomeDir string
+
+	// The shell for the user
+	Shell string
 }
 
 // Group represents a grouping of users.
@@ -257,6 +260,7 @@ func matchUserIndexValue(value string, idx int) lineFunc {
 			Gid:      parts[3],
 			Name:     parts[4],
 			HomeDir:  parts[5],
+			Shell:    parts[6],
 		}
 		// The pw_gecos field isn't quite standardized. Some docs
 		// say: "It is expected to be a comma separated list of
