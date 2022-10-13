@@ -2,16 +2,23 @@ package guest
 
 import (
 	"context"
+	"net"
 	"strconv"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/hashicorp/go-hclog"
+	"github.com/hashicorp/yamux"
+	"github.com/mdlayher/vsock"
 	"github.com/miekg/dns"
 )
 
 type handler struct {
 	L hclog.Logger
+
+	mu   sync.Mutex
+	sess *yamux.Session
+	sock net.Conn
 
 	config *dns.ClientConfig
 	client *dns.Client
@@ -43,20 +50,63 @@ func (h *handler) updateConfig() {
 	h.client = client
 }
 
+func (h *handler) connectHost() (net.Conn, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.sess != nil {
+		conn, err := h.sess.Open()
+		if err == nil {
+			return conn, nil
+		}
+
+		// Redial.
+		h.sess.Close()
+		h.sock.Close()
+	}
+
+	conn, err := vsock.Dial(vsock.Host, 53, &vsock.Config{})
+	if err != nil {
+		return nil, err
+	}
+
+	sess, err := yamux.Client(conn, yamux.DefaultConfig())
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+
+	h.sess = sess
+	h.sock = conn
+
+	return h.sess.Open()
+}
+
 func (h *handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 	h.configOnce.Do(h.updateConfig)
 
-	h.L.Debug("processing dns request", "question", r.Question[0].String(), "client", w.RemoteAddr())
+	conn, err := h.connectHost()
+	if err == nil {
+		defer conn.Close()
+
+		msg, _, err := h.client.ExchangeWithConn(r, &dns.Conn{Conn: conn})
+		if err == nil {
+			if len(msg.Answer) != 0 {
+				w.WriteMsg(msg)
+				return
+			}
+		} else {
+			h.L.Error("error exchange dns with host", "error", err)
+		}
+	} else {
+		h.L.Error("unable to resolve dns with vsock", "error", err)
+	}
 
 	for i := 0; i < 10; i++ {
 		for _, addr := range h.addresses {
+
 			msg, _, err := h.client.Exchange(r, addr)
 			if err == nil {
-				if len(msg.Answer) == 0 {
-					h.L.Debug("no answer detected")
-				} else {
-					h.L.Debug("responding to request", "answer", msg.Answer[0].String())
-				}
 				w.WriteMsg(msg)
 				return
 			}

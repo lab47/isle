@@ -479,6 +479,8 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 
 				sock.SetSocketListenerForPort(listener, 47)
 
+				v.runDNS(sock)
+
 				stateCh <- State{Running: true, Info: result}
 			}
 
