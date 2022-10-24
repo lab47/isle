@@ -3,8 +3,10 @@ package guest
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
@@ -39,6 +41,7 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/rs/xid"
 	"go.etcd.io/bbolt"
+	"golang.org/x/crypto/hkdf"
 	"golang.org/x/exp/slices"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
@@ -280,7 +283,7 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		},
 	}
 
-	var console bool
+	var console, smartClient bool
 
 	for _, str := range s.Environ() {
 		if str == "ISLE_CONSOLE=1" {
@@ -295,6 +298,7 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 
 			switch key {
 			case "_MSL_INFO":
+				smartClient = true
 				json.Unmarshal([]byte(val), &info)
 				continue
 			}
@@ -308,6 +312,17 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		return
 	}
 
+	if info.Name == "" {
+		name := g.oneAndOnlyIsle()
+		if name != "" {
+			g.L.Info("assuming name access to existing isle", "name", name)
+			info.Name = name
+		} else {
+			g.L.Warn("name not set, defaulting to msl")
+			info.Name = "ubuntu"
+		}
+	}
+
 	if info.Image == "" {
 		g.L.Warn("no image set, defaulting to ubuntu")
 		info.Image = "ghcr.io/lab47/ubuntu:latest"
@@ -315,11 +330,6 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		if info.Name == "" {
 			info.Name = "ubuntu"
 		}
-	}
-
-	if info.Name == "" {
-		g.L.Warn("name not set, defaulting to msl")
-		info.Name = "ubuntu"
 	}
 
 	imgref, err := name.ParseReference(info.Image)
@@ -345,7 +355,10 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 
 	if isPty {
 		width = ptyReq.Window.Width
-		setup = s.Extended(2)
+
+		if smartClient {
+			setup = s.Extended(2)
+		}
 	}
 
 	cinfo := ContainerInfo{
@@ -354,14 +367,6 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 		Status:  setup,
 		Width:   width,
 		Session: l,
-	}
-
-	err = g.ociUnpacker(&cinfo)
-	if err != nil {
-		g.L.Error("error configuring unpacker", "error", err)
-		fmt.Fprintf(s, "error configuring unpacker: %s\n", err)
-		s.Exit(1)
-		return
 	}
 
 	id, err := g.Container(ctx, &cinfo)
@@ -578,25 +583,12 @@ func (g *Guest) setupSnapshot(ctx context.Context, id string, i containerd.Image
 }
 
 func (g *Guest) HandleSSH(ctx context.Context, c net.Conn) {
-	var key *rsa.PrivateKey
+	_, key, err := ed25519.GenerateKey(
+		hkdf.New(sha256.New, []byte("isle rocks"), []byte("salty"), nil),
+	)
 
-	var data []byte
-
-	err := g.getVar("ssh-key", &data)
-	if err == nil {
-		key, _ = x509.ParsePKCS1PrivateKey(data)
-	}
-
-	if key == nil {
-		key, err = rsa.GenerateKey(rand.Reader, 2048)
-		if err != nil {
-			return
-		}
-
-		err = g.setVar("ssh-key", x509.MarshalPKCS1PrivateKey(key))
-		if err != nil {
-			return
-		}
+	if err != nil {
+		panic(err)
 	}
 
 	signer, err := gossh.NewSignerFromKey(key)
@@ -623,6 +615,8 @@ func (g *Guest) HandleSSH(ctx context.Context, c net.Conn) {
 	for k, v := range ssh.DefaultChannelHandlers {
 		sshServ.ChannelHandlers[k] = v
 	}
+
+	sshServ.ChannelHandlers["direct-tcpip"] = g.DirectTCPIPHandler
 
 	sshServ.SubsystemHandlers = map[string]ssh.SubsystemHandler{}
 	for k, v := range ssh.DefaultSubsystemHandlers {

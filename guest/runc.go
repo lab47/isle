@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -143,6 +144,35 @@ func (g *Guest) CleanupContainer(ctx context.Context, id string) {
 	}
 }
 
+func (g *Guest) lookupContainer(ctx context.Context, name string) (containerd.Container, error) {
+	if !g.isleExists(name) {
+		return nil, fmt.Errorf("unknown isle requested: %s", name)
+	}
+
+	id, err := g.Container(ctx, &ContainerInfo{
+		Name: name,
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	return g.C.LoadContainer(ctx, id)
+}
+
+func (g *Guest) oneAndOnlyIsle() string {
+	entries, err := os.ReadDir(basePath)
+	if err != nil {
+		return ""
+	}
+
+	if len(entries) != 1 {
+		return ""
+	}
+
+	return entries[0].Name()
+}
+
 func (g *Guest) Container(ctx context.Context, info *ContainerInfo) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -224,7 +254,6 @@ type ContainerInfo struct {
 	Width   int
 	Session *yamux.Session
 
-	Unpacker  func(ctx context.Context, path string) error
 	FixupSpec func(sp *specs.Spec) error
 
 	Config *shardconfig.Config
@@ -232,95 +261,121 @@ type ContainerInfo struct {
 	OCIConfig *v1.Config
 }
 
-func (g *Guest) ociUnpacker(info *ContainerInfo) error {
-	info.Unpacker = func(ctx context.Context, rootFsPath string) error {
-		rimg, err := remote.Image(info.Img,
-			remote.WithPlatform(v1.Platform{
-				Architecture: runtime.GOARCH,
-				OS:           "linux",
-			}),
-		)
-		if err != nil {
-			return err
+func (g *Guest) unpackImg(
+	ctx context.Context,
+	img name.Reference,
+	bundlePath string,
+	status io.Writer,
+	width int,
+) (*v1.Config, error) {
+	rimg, err := remote.Image(img,
+		remote.WithPlatform(v1.Platform{
+			Architecture: runtime.GOARCH,
+			OS:           "linux",
+		}),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg, err := rimg.ConfigFile()
+	if err != nil {
+		return nil, err
+	}
+
+	rootFsPath := filepath.Join(bundlePath, "rootfs")
+
+	err = os.MkdirAll(rootFsPath, 0755)
+	if err != nil {
+		return nil, err
+	}
+
+	f, err := os.Create(filepath.Join(bundlePath, "info.json"))
+	if err != nil {
+		return nil, err
+	}
+
+	json.NewEncoder(f).Encode(&isleInfo{
+		Image: img.Name(),
+	})
+
+	f.Close()
+
+	f, err = os.Create(filepath.Join(bundlePath, "oci-config.json"))
+	if err != nil {
+		return nil, err
+	}
+
+	json.NewEncoder(f).Encode(cfg.Config)
+
+	f.Close()
+
+	layers, err := rimg.Layers()
+	if err != nil {
+		return nil, err
+	}
+
+	var max int64
+
+	for _, l := range layers {
+		sz, err := l.Size()
+		if err == nil {
+			max += sz
 		}
+	}
 
-		cfg, err := rimg.ConfigFile()
-		if err != nil {
-			return err
-		}
+	if status == nil {
+		status = ioutil.Discard
+	}
 
-		info.OCIConfig = &cfg.Config
+	bar := progressbar.NewOptions64(
+		max,
+		progressbar.OptionSetDescription("Unpacking"),
+		progressbar.OptionSetWriter(status),
+		progressbar.OptionShowBytes(true),
+		progressbar.OptionSetWidth(10),
+		progressbar.OptionSetTerminalWidth(width),
+		progressbar.OptionFullWidth(),
+		progressbar.OptionThrottle(65*time.Millisecond),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSpinnerType(14),
+		progressbar.OptionUseANSICodes(true),
+	)
+	bar.RenderBlank()
 
-		err = os.MkdirAll(rootFsPath, 0755)
-		if err != nil {
-			return err
-		}
-
-		layers, err := rimg.Layers()
-		if err != nil {
-			return err
-		}
-
-		var max int64
-
-		for _, l := range layers {
-			sz, err := l.Size()
-			if err == nil {
-				max += sz
-			}
-		}
-
-		bar := progressbar.NewOptions64(
-			max,
-			progressbar.OptionSetDescription("Unpacking"),
-			progressbar.OptionSetWriter(info.Status),
-			progressbar.OptionShowBytes(true),
-			progressbar.OptionSetWidth(10),
-			progressbar.OptionSetTerminalWidth(info.Width),
-			progressbar.OptionFullWidth(),
-			progressbar.OptionThrottle(65*time.Millisecond),
-			progressbar.OptionShowCount(),
-			progressbar.OptionSpinnerType(14),
-			progressbar.OptionUseANSICodes(true),
-		)
-		bar.RenderBlank()
-
-		for i, l := range layers {
-			err := func() error {
-				r, err := l.Compressed()
-				if err != nil {
-					return err
-				}
-
-				defer r.Close()
-
-				gr, err := gzip.NewReader(io.TeeReader(r, bar))
-				if err != nil {
-					return err
-				}
-
-				defer gr.Close()
-
-				sz, err := archive.Apply(ctx, rootFsPath, gr)
-				if err != nil {
-					return err
-				}
-
-				g.L.Info("unpacked layer for image", "image", info.Img.Name(), "layer", i, "size", sz)
-				return nil
-			}()
-
+	for i, l := range layers {
+		err := func() error {
+			r, err := l.Compressed()
 			if err != nil {
 				return err
 			}
+
+			defer r.Close()
+
+			gr, err := gzip.NewReader(io.TeeReader(r, bar))
+			if err != nil {
+				return err
+			}
+
+			defer gr.Close()
+
+			sz, err := archive.Apply(ctx, rootFsPath, gr)
+			if err != nil {
+				return err
+			}
+
+			g.L.Info("unpacked layer for image", "image", img.Name(), "layer", i, "size", sz)
+			return nil
+		}()
+
+		if err != nil {
+			return nil, err
 		}
-
-		bar.Finish()
-
-		return nil
 	}
 
-	return nil
+	bar.Finish()
+
+	return &cfg.Config, nil
 }
 
 func intptr(v int64) *int64 {
@@ -346,74 +401,21 @@ var devCharEntries = []devEntry{
 	{"zero", 1, 5},
 }
 
-func (g *Guest) StartContainer(
-	ctx context.Context,
-	info *ContainerInfo,
-	id string,
-) error {
-	name := info.Name
+var ErrUnknownContainer = errors.New("unknown container")
 
+func (g *Guest) bootContainer(
+	ctx context.Context,
+	name string,
+	id string,
+	started chan string,
+	setup func(task containerd.Task) error,
+) error {
 	bundlePath := filepath.Join(basePath, name)
 	rootFsPath := filepath.Join(bundlePath, "rootfs")
 
 	if _, err := os.Stat(rootFsPath); err != nil {
-		err = info.Unpacker(ctx, rootFsPath)
-		if err != nil {
-			return err
-		}
-
-		if info.OCIConfig != nil {
-			f, err := os.Create(filepath.Join(bundlePath, "oci-config.json"))
-			if err != nil {
-				return err
-			}
-
-			json.NewEncoder(f).Encode(info.OCIConfig)
-
-			f.Close()
-		}
-	} else {
-		f, err := os.Open(filepath.Join(bundlePath, "oci-config.json"))
-		if err == nil {
-			var cfg v1.Config
-			json.NewDecoder(f).Decode(&cfg)
-
-			info.OCIConfig = &cfg
-
-			f.Close()
-		}
+		return ErrUnknownContainer
 	}
-
-	f, err := os.Create(filepath.Join(bundlePath, "info.json"))
-	if err != nil {
-		return err
-	}
-
-	json.NewEncoder(f).Encode(&isleInfo{
-		Image: info.Img.Name(),
-	})
-
-	f.Close()
-
-	err = ioutil.WriteFile(
-		filepath.Join(bundlePath, "resolv.conf"),
-		[]byte(fmt.Sprintf("nameserver %s\n", g.hostAddr)), 0644)
-	if err != nil {
-		return err
-	}
-
-	err = ioutil.WriteFile(
-		filepath.Join(bundlePath, "hosts"),
-		[]byte(fmt.Sprintf(
-			"127.0.0.1\tlocalhost localhost.localdomain %s\n"+
-				"::1\tlocalhost localhost.localdomain %s\n"+
-				"192.168.64.1\tmac mac.internal host.internal\n",
-			name, name)), 0644)
-	if err != nil {
-		return err
-	}
-
-	ioutil.WriteFile(filepath.Join(rootFsPath, "etc", "hostname"), []byte(name+"\n"), 0644)
 
 	volHome := "/vol/user/home/" + g.User
 
@@ -621,13 +623,6 @@ func (g *Guest) StartContainer(
 		},
 	}
 
-	if info.FixupSpec != nil {
-		err = info.FixupSpec(&s)
-		if err != nil {
-			return err
-		}
-	}
-
 	var opts []containerd.NewContainerOpts
 	opts = append(opts,
 		containerd.WithNewSpec(
@@ -640,7 +635,7 @@ func (g *Guest) StartContainer(
 			oci.WithRootFSPath(rootFsPath),
 		),
 		containerd.WithContainerLabels(map[string]string{
-			"name": info.Name,
+			"name": name,
 		}),
 	)
 
@@ -718,68 +713,11 @@ func (g *Guest) StartContainer(
 		g.L.Error("deleted cni for container", "id", id, "error", err)
 	}()
 
-	setup := []string{
-		// We need be sure that /var/run is mapped to /run because
-		// we mount /run under the host's /run so that it can be
-		// accessed by the host.
-		"rm -rf /var/run; ln -s /run /var/run",
-		"mkdir -p /dev/char",
-	}
-
-	for _, ent := range devCharEntries {
-		setup = append(setup, fmt.Sprintf(
-			"ln -sf /dev/%s /dev/char/%d:%d", ent.name, ent.major, ent.minor,
-		))
-	}
-
-	if info.Config == nil || info.Config.Service == nil {
-		setup = append(setup,
-			"mkdir -p /etc/sudoers.d",
-			"echo '%user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/00-%user",
-			"echo root:root | chpasswd",
-			// A little useradd house keeping to default to bash if possible
-			"test -e /bin/bash && sed -i -e 's|/bin/sh|/bin/bash|' /etc/default/useradd",
-			"id %user || useradd -u 501 -m %user",
-			"echo %user:%user | chpasswd",
-			"stat /home/%user/mac || ln -sf /share/home /home/%user/mac",
-		)
-	}
-
-	repl := strings.NewReplacer("%user", g.User)
-
-	for i, str := range setup {
-		setup[i] = repl.Replace(str)
-	}
-
-	var setupSp specs.Process
-	setupSp.Args = []string{"/bin/sh", "-c", strings.Join(setup, "; ")}
-	setupSp.Env = []string{"PATH=/bin:/sbin:/usr/bin:/usr/sbin:/opt/isle/bin"}
-	setupSp.Cwd = "/"
-
-	g.L.Info("running container setup")
-
-	proc, err := task.Exec(ctx, "setup", &setupSp,
-		cio.LogFile(filepath.Join(bundlePath, "setup.out")))
-	if err != nil {
-		return err
-	}
-
-	err = proc.Start(ctx)
-	if err != nil {
-		return err
-	}
-
-	ch, err := proc.Wait(ctx)
-	if err != nil {
-		return err
-	}
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case es := <-ch:
-		if es.ExitCode() != 0 {
-			return fmt.Errorf("error running setup")
+	if setup != nil {
+		err = setup(task)
+		if err != nil {
+			g.L.Error("error running setup", "error", err)
+			return err
 		}
 	}
 
@@ -803,13 +741,13 @@ func (g *Guest) StartContainer(
 		path := fmt.Sprintf("/proc/%d/net/tcp", task.Pid())
 
 		g.L.Info("monitoring for ports", "path", path, "target", target)
-		go g.monitorPorts(ctx, info.Session, target, path)
+		go g.monitorPorts(ctx, g.currentSession, target, path)
 	}
 
 	g.L.Warn("waiting for signal to stop container")
 
 	select {
-	case info.StartCh <- id:
+	case started <- id:
 		// ok
 	case <-ctx.Done():
 		return ctx.Err()
@@ -859,6 +797,146 @@ loop:
 	}
 
 	return orig
+}
+
+func (g *Guest) isleExists(name string) bool {
+	bundlePath := filepath.Join(basePath, name)
+	rootFsPath := filepath.Join(bundlePath, "rootfs")
+
+	fi, err := os.Stat(rootFsPath)
+	return err == nil && fi.IsDir()
+}
+
+func (g *Guest) SetupIsle(
+	ctx context.Context,
+	name string,
+	img name.Reference,
+	status io.Writer,
+	width int,
+) error {
+	bundlePath := filepath.Join(basePath, name)
+	rootFsPath := filepath.Join(bundlePath, "rootfs")
+
+	if _, err := os.Stat(rootFsPath); err != nil {
+		_, err = g.unpackImg(ctx, img, bundlePath, status, width)
+		if err != nil {
+			return err
+		}
+	}
+
+	err := ioutil.WriteFile(
+		filepath.Join(bundlePath, "resolv.conf"),
+		[]byte(fmt.Sprintf("nameserver %s\n", g.hostAddr)), 0644)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(
+		filepath.Join(bundlePath, "hosts"),
+		[]byte(fmt.Sprintf(
+			"127.0.0.1\tlocalhost localhost.localdomain %s\n"+
+				"::1\tlocalhost localhost.localdomain %s\n"+
+				"192.168.64.1\tmac mac.internal host.internal\n",
+			name, name)), 0644)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(filepath.Join(rootFsPath, "etc", "hostname"), []byte(name+"\n"), 0644)
+
+	return err
+}
+
+func (g *Guest) setupContainer(ctx context.Context, task containerd.Task, bundlePath string) error {
+	setup := []string{
+		// We need be sure that /var/run is mapped to /run because
+		// we mount /run under the host's /run so that it can be
+		// accessed by the host.
+		"rm -rf /var/run; ln -s /run /var/run",
+		"mkdir -p /dev/char",
+	}
+
+	for _, ent := range devCharEntries {
+		setup = append(setup, fmt.Sprintf(
+			"ln -sf /dev/%s /dev/char/%d:%d", ent.name, ent.major, ent.minor,
+		))
+	}
+
+	setup = append(setup,
+		"mkdir -p /etc/sudoers.d",
+		"echo '%user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/00-%user",
+		"echo root:root | chpasswd",
+		// A little useradd house keeping to default to bash if possible
+		"test -e /bin/bash && sed -i -e 's|/bin/sh|/bin/bash|' /etc/default/useradd",
+		"id %user || useradd -u 501 -m %user",
+		"echo %user:%user | chpasswd",
+		"stat /home/%user/mac || ln -sf /share/home /home/%user/mac",
+	)
+
+	repl := strings.NewReplacer("%user", g.User)
+
+	for i, str := range setup {
+		setup[i] = repl.Replace(str)
+	}
+
+	var setupSp specs.Process
+	setupSp.Args = []string{"/bin/sh", "-c", strings.Join(setup, "; ")}
+	setupSp.Env = []string{"PATH=/bin:/sbin:/usr/bin:/usr/sbin:/opt/isle/bin"}
+	setupSp.Cwd = "/"
+
+	g.L.Info("running container setup")
+
+	proc, err := task.Exec(ctx, "setup", &setupSp,
+		cio.LogFile(filepath.Join(bundlePath, "setup.out")))
+	if err != nil {
+		return err
+	}
+
+	err = proc.Start(ctx)
+	if err != nil {
+		return err
+	}
+
+	ch, err := proc.Wait(ctx)
+	if err != nil {
+		return err
+	}
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case es := <-ch:
+		if es.ExitCode() != 0 {
+			return fmt.Errorf("error running setup")
+		}
+	}
+
+	return nil
+}
+
+func (g *Guest) StartContainer(
+	ctx context.Context,
+	info *ContainerInfo,
+	id string,
+) error {
+	name := info.Name
+
+	if !g.isleExists(name) {
+		if info.Img == nil {
+			return fmt.Errorf("unable to create new isle, no image specified")
+		}
+
+		err := g.SetupIsle(ctx, name, info.Img, info.Status, info.Width)
+		if err != nil {
+			return err
+		}
+
+		return g.bootContainer(ctx, info.Name, id, info.StartCh, func(task containerd.Task) error {
+			return g.setupContainer(ctx, task, filepath.Join(basePath, name))
+		})
+	} else {
+		return g.bootContainer(ctx, info.Name, id, info.StartCh, nil)
+	}
 }
 
 type mountStatus struct {

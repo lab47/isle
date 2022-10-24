@@ -2,6 +2,7 @@ package guest
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -9,7 +10,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/lab47/isle/pkg/shardconfig"
 	"github.com/pkg/errors"
 	"github.com/rs/xid"
@@ -178,65 +178,7 @@ func (g *Guest) MonitorApp(ctx context.Context, path string, cfg *shardconfig.Co
 }
 
 func (g *Guest) StartApp(ctx context.Context, path string, cfg *shardconfig.Config, id string) error {
-	started := make(chan string, 1)
-	errorer := make(chan error, 1)
-
-	info := ContainerInfo{
-		Name:   cfg.Name,
-		Status: ioutil.Discard,
-	}
-
-	if cfg.Root.OCI != "" {
-		imgref, err := name.ParseReference(cfg.Root.OCI)
-		if err != nil {
-			return err
-		}
-
-		info.Img = imgref
-	}
-
-	bundlePath := filepath.Join(basePath, info.Name)
-
-	err := g.ociUnpacker(&info)
-	if err != nil {
-		return err
-	}
-
-	info.StartCh = started
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	go func() {
-		errorer <- g.StartContainer(ctx, &info, id)
-	}()
-
-	select {
-	case <-ctx.Done():
-		// Wait for the sub-goroutine to finish
-		<-errorer
-		return ctx.Err()
-	case err := <-errorer:
-		g.L.Error("error booting container", "error", err)
-		return err
-	case <-started:
-		// ok
-	}
-
-	g.L.Info("container for app started, running app")
-	err = g.runApp(ctx, bundlePath, info, cfg, id)
-	if err != nil {
-		if !errors.Is(err, context.Canceled) {
-			g.L.Error("error running app", "error", err)
-		}
-	}
-
-	cancel()
-
-	// We cancel the context so we should be able to safely do this to
-	// wait for the StartContainer call to return.
-
-	return <-errorer
+	return fmt.Errorf("removed")
 }
 
 func (g *Guest) runApp(ctx context.Context, bundlePath string, info ContainerInfo, cfg *shardconfig.Config, id string) error {
