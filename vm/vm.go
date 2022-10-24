@@ -524,6 +524,17 @@ func (v *VM) startListener(
 		return nil, err
 	}
 
+	var l2 net.Listener
+
+	if v.Config.SSHPort > 0 {
+		l2, err = net.Listen("tcp", fmt.Sprintf("localhost:%d", v.Config.SSHPort))
+		if err != nil {
+			v.L.Error("unable to start listing on explicit ssh port", "error", err)
+		} else {
+			v.L.Info("listening on explicit ssh port", "port", v.Config.SSHPort)
+		}
+	}
+
 	go func() {
 		for {
 			select {
@@ -597,6 +608,9 @@ func (v *VM) startListener(
 		go v.timesync(ctx, sess)
 		go v.handleFromGuest(ctx, sess)
 		go v.standaloneBridge(ctx, sock, l)
+		if l2 != nil {
+			go v.standaloneBridge(ctx, sock, l2)
+		}
 
 		return
 	})

@@ -21,6 +21,7 @@ type Config struct {
 	UserSize   string `json:"user_disk"`
 	MacAddress string `json:"mac_address"`
 	ClusterId  string `json:"unique_id"`
+	SSHPort    int    `json:"ssh_port"`
 }
 
 func newUniqueId() string {
@@ -49,6 +50,7 @@ func CheckConfig(log hclog.Logger, configPath string) error {
 			UserSize:   "100G",
 			MacAddress: mac.String(),
 			ClusterId:  newUniqueId(),
+			SSHPort:    4722,
 		})
 		f.Close()
 	} else {
