@@ -12,6 +12,7 @@ import (
 
 const (
 	forwardedTCPChannelType = "forwarded-tcpip"
+	StreamLocalType         = "direct-streamlocal@openssh.com"
 )
 
 // direct-tcpip data struct as specified in RFC4254, Section 7.2
@@ -190,4 +191,46 @@ func (h *ForwardedTCPHandler) HandleSSHRequest(ctx Context, srv *Server, req *go
 	default:
 		return false, nil
 	}
+}
+
+// direct-tcpip data struct as specified in RFC4254, Section 7.2
+type streamForwardChannelData struct {
+	Target     string
+	Origin     string
+	OriginPort uint32
+}
+
+// StreamLocalHandler can be enabled by adding it to the server's
+// ChannelHandlers under direct-streamlocal@openssh.com.
+func StreamLocalHandler(srv *Server, conn *gossh.ServerConn, newChan gossh.NewChannel, ctx Context) {
+	d := streamForwardChannelData{}
+	if err := gossh.Unmarshal(newChan.ExtraData(), &d); err != nil {
+		newChan.Reject(gossh.ConnectionFailed, "error parsing forward data: "+err.Error())
+		return
+	}
+
+	var dialer net.Dialer
+	dconn, err := dialer.DialContext(ctx, "unix", d.Target)
+	if err != nil {
+		newChan.Reject(gossh.ConnectionFailed, err.Error())
+		return
+	}
+
+	ch, reqs, err := newChan.Accept()
+	if err != nil {
+		dconn.Close()
+		return
+	}
+	go gossh.DiscardRequests(reqs)
+
+	go func() {
+		defer ch.Close()
+		defer dconn.Close()
+		io.Copy(ch, dconn)
+	}()
+	go func() {
+		defer ch.Close()
+		defer dconn.Close()
+		io.Copy(dconn, ch)
+	}()
 }
