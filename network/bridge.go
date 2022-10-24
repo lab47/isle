@@ -181,6 +181,23 @@ func netnsPath(pid int) string {
 	return fmt.Sprintf("/proc/%d/ns/net", pid)
 }
 
+func DialTCP(ctx context.Context, pid int, dest string) (net.Conn, error) {
+	path := netnsPath(pid)
+
+	var (
+		conn net.Conn
+		err  error
+	)
+
+	ns.WithNetNSPath(path, func(nn ns.NetNS) error {
+		var dialer net.Dialer
+		conn, err = dialer.DialContext(ctx, "tcp", dest)
+		return err
+	})
+
+	return conn, err
+}
+
 func ConfigureProcess(ctx context.Context, log hclog.Logger, pid int, bc *BridgeConfig) ([]NetworkConfig, error) {
 	br, brInterface, err := setupBridge(bc)
 	if err != nil {
