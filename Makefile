@@ -7,7 +7,7 @@ codesign:
 
 .PHONY: build
 build:
-	GOOS=macos go build -o bin/linux ./cmd/linux
+	GOOS=darwin go build -o bin/linux ./cmd/linux
 
 test-build: build
 	cp bin/linux ~/mac/tmp
