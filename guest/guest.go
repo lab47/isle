@@ -958,7 +958,7 @@ func (g *Guest) handleProtocol(conn net.Conn) {
 	}
 }
 
-func (g *Guest) monitorPorts(ctx context.Context, sess *yamux.Session, target string, path string) {
+func (g *Guest) monitorPorts(ctx context.Context, sess *yamux.Session, target, target6 string, path, pathv6 string) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -976,10 +976,19 @@ func (g *Guest) monitorPorts(ctx context.Context, sess *yamux.Session, target st
 			return
 		case <-ticker.C:
 			g.readPorts(ctx, sess, target, path, ports)
+			g.readPorts(ctx, sess, target6, pathv6, ports)
 		case <-sigCh:
 			g.readPorts(ctx, sess, target, path, ports)
+			g.readPorts(ctx, sess, target6, pathv6, ports)
 		}
 	}
+}
+
+var bindLocals = map[string]struct{}{
+	"0100007F":                         {},
+	"00000000000000000000000001000000": {},
+	"00000000":                         {},
+	"00000000000000000000000000000000": {},
 }
 
 func (g *Guest) readPorts(ctx context.Context, sess *yamux.Session, target string, path string, ports map[int64]struct{}) {
@@ -1009,7 +1018,7 @@ func (g *Guest) readPorts(ctx context.Context, sess *yamux.Session, target strin
 		local := parts[1]
 		remote := parts[2]
 
-		if remote != "00000000:0000" {
+		if remote != "00000000:0000" && remote != "00000000000000000000000000000000:0000" {
 			continue
 		}
 
@@ -1021,7 +1030,7 @@ func (g *Guest) readPorts(ctx context.Context, sess *yamux.Session, target strin
 		addr := local[:colon]
 		port := local[colon+1:]
 
-		if addr != "00000000" {
+		if _, found := bindLocals[addr]; !found {
 			continue
 		}
 

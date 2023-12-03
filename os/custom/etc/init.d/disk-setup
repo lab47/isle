@@ -20,6 +20,8 @@ init_KOPT() {
 format_mount() {
 	mkdir -p "$2"
 
+	fsck "$1" || true
+
 	if ! mount "$1" "$2"; then
 		mkfs.ext4 "$1"
 

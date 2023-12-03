@@ -513,6 +513,12 @@ func (g *Guest) bootContainer(
 				Options:     []string{"nosuid", "noexec", "nodev", "rw"},
 			},
 			{
+				Destination: "/lib/modules",
+				Type:        "bind",
+				Source:      "/lib/modules",
+				Options:     []string{"rbind", "rshared", "ro"},
+			},
+			{
 				Destination: "/run",
 				Type:        "bind",
 				Source:      runDir,
@@ -597,6 +603,14 @@ func (g *Guest) bootContainer(
 						Type:   "c",
 						Major:  intptr(1),
 						Minor:  intptr(3),
+						Access: "rwm",
+						Allow:  true,
+					},
+					{
+						// "/dev/fuse",
+						Type:   "c",
+						Major:  intptr(10),
+						Minor:  intptr(229),
 						Access: "rwm",
 						Allow:  true,
 					},
@@ -739,9 +753,10 @@ func (g *Guest) bootContainer(
 		g.L.Info("networking configured", "ipv4", target, "ipv6", target6)
 
 		path := fmt.Sprintf("/proc/%d/net/tcp", task.Pid())
+		pathv6 := fmt.Sprintf("/proc/%d/net/tcp6", task.Pid())
 
-		g.L.Info("monitoring for ports", "path", path, "target", target)
-		go g.monitorPorts(ctx, g.currentSession, target, path)
+		g.L.Info("monitoring for ports", "path", path, "pathv6", pathv6, "target", target)
+		go g.monitorPorts(ctx, g.currentSession, target, target6, path, pathv6)
 	}
 
 	g.L.Warn("waiting for signal to stop container")
@@ -854,6 +869,9 @@ func (g *Guest) setupContainer(ctx context.Context, task containerd.Task, bundle
 		// accessed by the host.
 		"rm -rf /var/run; ln -s /run /var/run",
 		"mkdir -p /dev/char",
+		"mkdir -p /dev/net",
+		"mknod /dev/net/tun -m 0666 c 10 200",
+		"mknod /dev/fuse -m 0666 c 10 229",
 	}
 
 	for _, ent := range devCharEntries {
