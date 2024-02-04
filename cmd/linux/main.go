@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,7 +23,9 @@ import (
 	"github.com/lab47/isle/pkg/ghrelease"
 	"github.com/lab47/isle/vm"
 	"github.com/mattn/go-isatty"
+	"github.com/mitchellh/go-homedir"
 	"github.com/morikuni/aec"
+	"github.com/oleksandr/bonjour"
 	"github.com/spf13/pflag"
 	"golang.org/x/sys/unix"
 )
@@ -45,6 +47,9 @@ var (
 	fConfig   = pflag.Bool("configure", false, "configure isle")
 	fStop     = pflag.Bool("stop", false, "stop the background VM")
 	fConsole  = pflag.BoolP("console", "C", false, "Access the Isle Console")
+	fList     = pflag.Bool("list-local", false, "list local isle instances")
+	fConnect  = pflag.StringP("connect", "L", "", "connect to an existing instance of the given cluster-id")
+	fToken    = pflag.String("token", "", "token to authenticate with existing remote instance")
 )
 
 func main() {
@@ -53,6 +58,32 @@ func main() {
 	if *fVersion {
 		fmt.Printf("isle version: %s\n", Version)
 		os.Exit(0)
+	}
+
+	if *fList {
+		r, err := bonjour.NewResolver(nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating bonjour resolver: %s\n", err)
+			os.Exit(1)
+		}
+
+		results := make(chan *bonjour.ServiceEntry)
+
+		err = r.Browse("_isle._tcp", "local.", results)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Failed to browse:", err.Error())
+		}
+
+		t := time.NewTimer(1 * time.Minute)
+
+		for {
+			select {
+			case e := <-results:
+				fmt.Printf("%s @ %s\n  %s\n", e.Instance, e.HostName, strings.Join(e.Text, "\n  "))
+			case <-t.C:
+				return
+			}
+		}
 	}
 
 	if *fBgStart {
@@ -97,6 +128,103 @@ func main() {
 		stateDir string
 		err      error
 	)
+
+	named, err := reference.ParseNormalizedNamed(*fImage)
+	if err != nil {
+		log.Error("error parsing image name", "error", err)
+		os.Exit(1)
+	}
+
+	named = reference.TagNameOnly(named)
+
+	if *fName == "" {
+		// See if there is a recently used name
+		data, err := os.ReadFile(filepath.Join(stateDir, "recent"))
+		if err == nil {
+			*fName = strings.TrimSpace(string(data))
+		} else {
+			*fName = "isle"
+		}
+	}
+
+	isTerm := isatty.IsTerminal(os.Stderr.Fd())
+
+	connectTo := *fConnect
+
+	if connectTo != "" {
+		fmt.Printf("Looking up isle in bonjour: %s\n", connectTo)
+
+		r, err := bonjour.NewResolver(nil)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating bonjour resolver: %s\n", err)
+			os.Exit(1)
+		}
+
+		results := make(chan *bonjour.ServiceEntry)
+
+		err = r.Browse("_isle._tcp", "local.", results)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "Failed to browse:", err.Error())
+		}
+
+		t := time.NewTimer(1 * time.Minute)
+
+		var ent *bonjour.ServiceEntry
+
+	loop:
+		for {
+			select {
+			case e := <-results:
+				if e.Instance == connectTo || e.HostName == connectTo {
+					ent = e
+					break loop
+				}
+
+			case <-t.C:
+				fmt.Fprintf(os.Stderr, "Unable to locate any instance by the name '%s'\n", connectTo)
+				return
+			}
+		}
+
+		c := &isle.CLI{
+			L:         log,
+			Image:     named.String(),
+			Name:      *fName,
+			Dir:       *fDir,
+			AsRoot:    *fRoot,
+			IsTerm:    isTerm,
+			ConnectTo: ent,
+			Token:     *fToken,
+		}
+
+		toTry := []string{"~/.config/isle/key", "~/.ssh/isle"}
+
+		for _, keyPath := range toTry {
+			path, err := homedir.Expand(keyPath)
+			if err == nil {
+				data, err := os.ReadFile(path)
+				if err == nil {
+					c.LocalKey = data
+					c.L.Info("advertising ability to use ssh key", "path", path)
+					break
+				} else {
+					c.L.Error("unable to read key", "key", path, "error", err)
+				}
+			} else {
+				c.L.Info("No key found to use", "path", keyPath)
+			}
+		}
+
+		err = c.Shell(strings.Join(pflag.Args(), " "), os.Stdin, os.Stdout)
+		if err != nil {
+			if ee, ok := err.(*ssh.ExitError); ok {
+				os.Exit(ee.ExitStatus())
+			}
+			c.L.Error("error starting shell", "error", err)
+		}
+
+		return
+	}
 
 	if *fStateDir != "" {
 		stateDir, err = filepath.Abs(*fStateDir)
@@ -149,7 +277,7 @@ func main() {
 	pidPath := filepath.Join(stateDir, "vm.pid")
 
 	if *fStop {
-		data, err := ioutil.ReadFile(pidPath)
+		data, err := os.ReadFile(pidPath)
 		if err != nil {
 			log.Error("error reading pid file", "error", err)
 			os.Exit(1)
@@ -168,7 +296,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	err = vm.CheckConfig(log, configPath)
+	cfg, err := vm.CheckConfig(log, configPath)
 	if err != nil {
 		log.Error("error checking configuration", "error", err.Error())
 		os.Exit(1)
@@ -181,7 +309,7 @@ func main() {
 
 	var autoStart bool
 
-	data, err := ioutil.ReadFile(pidPath)
+	data, err := os.ReadFile(pidPath)
 	if err != nil {
 		autoStart = true
 	} else {
@@ -194,8 +322,6 @@ func main() {
 			autoStart = true
 		}
 	}
-
-	isTerm := isatty.IsTerminal(os.Stderr.Fd())
 
 	if autoStart {
 		if isTerm {
@@ -225,25 +351,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	named, err := reference.ParseNormalizedNamed(*fImage)
-	if err != nil {
-		log.Error("error parsing image name", "error", err)
-		os.Exit(1)
-	}
-
-	named = reference.TagNameOnly(named)
-
-	if *fName == "" {
-		// See if there is a recently used name
-		data, err := ioutil.ReadFile(filepath.Join(stateDir, "recent"))
-		if err == nil {
-			*fName = strings.TrimSpace(string(data))
-		} else {
-			*fName = "isle"
-		}
-	}
-
-	ioutil.WriteFile(filepath.Join(stateDir, "recent"), []byte(*fName+"\n"), 0644)
+	os.WriteFile(filepath.Join(stateDir, "recent"), []byte(*fName+"\n"), 0644)
 
 	c := &isle.CLI{
 		L:       log,
@@ -254,6 +362,7 @@ func main() {
 		AsRoot:  *fRoot,
 		IsTerm:  isTerm,
 		Console: *fConsole,
+		Token:   cfg.Token,
 	}
 
 	err = c.Shell(strings.Join(pflag.Args(), " "), os.Stdin, os.Stdout)
@@ -287,7 +396,7 @@ func setupStateDir(log hclog.Logger, stateDir string) error {
 			return nil
 		}
 
-		data, err := ioutil.ReadFile(filepath.Join(stateDir, "version"))
+		data, err := os.ReadFile(filepath.Join(stateDir, "version"))
 		curVersion := strings.TrimSpace(string(data))
 		if err == nil {
 			if Version == curVersion {
@@ -311,7 +420,7 @@ func setupStateDir(log hclog.Logger, stateDir string) error {
 			log.Info("using cached os bundle", "path", path)
 			defer f.Close()
 
-			ioutil.WriteFile(filepath.Join(stateDir, "version"), []byte(Version), 0644)
+			os.WriteFile(filepath.Join(stateDir, "version"), []byte(Version), 0644)
 
 			fi, _ := f.Stat()
 
@@ -346,7 +455,7 @@ func setupStateDir(log hclog.Logger, stateDir string) error {
 		if strings.HasPrefix(asset.Name, "os-") &&
 			strings.HasSuffix(asset.Name, assetSuffix) &&
 			asset.ContentType == "application/x-gtar" {
-			ioutil.WriteFile(filepath.Join(stateDir, "version"), []byte(Version), 0644)
+			os.WriteFile(filepath.Join(stateDir, "version"), []byte(Version), 0644)
 			return ghrelease.UnpackAsset(&asset, stateDir)
 		}
 	}
@@ -422,10 +531,44 @@ func startVM(log hclog.Logger, stateDir, configPath, pidPath string) {
 
 	defer os.Remove(pidPath)
 
+	if cfg.SSHPort > 0 {
+		log.Info("registering with bonjour", "id", cfg.ClusterId)
+		s, xerr := bonjour.Register(cfg.ClusterId, "_isle._tcp", "local.", cfg.SSHPort, []string{"Running state: " + stateDir}, nil)
+		if xerr != nil {
+			fmt.Fprintf(os.Stderr, "Unable to register on bonjour: %s", xerr)
+			return
+		}
+
+		defer s.Shutdown()
+	}
+
 	v := vm.VM{
 		L:        log,
 		StateDir: stateDir,
 		Config:   cfg,
+	}
+
+	toTry := []string{"~/.config/isle/key.pub", "~/.ssh/isle.pub"}
+
+	for _, keyPath := range toTry {
+		path, err := homedir.Expand(keyPath)
+		if err == nil {
+			data, err := os.ReadFile(path)
+			if err == nil {
+				key, _, _, _, err := ssh.ParseAuthorizedKey(data)
+				if err != nil {
+					log.Error("error parsing public key", "error", err, "path", path)
+				} else {
+					v.AuthKey = base64.RawStdEncoding.EncodeToString(key.Marshal())
+					log.Info("advertising ability to use ssh key", "path", path)
+					break
+				}
+			} else {
+				log.Error("unable to read key", "key", path, "error", err)
+			}
+		} else {
+			log.Info("No key found to use", "path", keyPath)
+		}
 	}
 
 	ctx := context.Background()

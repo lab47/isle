@@ -1,14 +1,14 @@
 package kcmdline
 
 import (
-	"io/ioutil"
+	"os"
 	"strings"
 
 	"github.com/google/shlex"
 )
 
 func CommandLine() map[string]string {
-	data, err := ioutil.ReadFile("/proc/cmdline")
+	data, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
 		return nil
 	}

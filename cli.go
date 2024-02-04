@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net"
 	"os"
 	"os/signal"
@@ -19,16 +18,21 @@ import (
 	"github.com/lab47/isle/pkg/crypto/ssh/terminal"
 	"github.com/lab47/isle/types"
 	"github.com/morikuni/aec"
+	"github.com/oleksandr/bonjour"
 	"golang.org/x/sys/unix"
 )
 
 type CLI struct {
+	Token   string
 	Name    string
 	Image   string
 	Dir     string
 	AsRoot  bool
 	IsTerm  bool
 	Console bool
+
+	LocalKey  []byte
+	ConnectTo *bonjour.ServiceEntry
 
 	L    hclog.Logger
 	Path string
@@ -39,6 +43,20 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 	cfg.HostKeyCallback = func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		return nil
 	}
+
+	if c.LocalKey != nil {
+		sig, err := ssh.ParsePrivateKey(c.LocalKey)
+		if err != nil {
+			return err
+		}
+
+		cfg.Auth = append(cfg.Auth, ssh.PublicKeys(sig))
+	}
+
+	cfg.Auth = append(cfg.Auth,
+		ssh.Password(c.Token),
+	)
+
 	cfg.SetDefaults()
 
 	var (
@@ -46,21 +64,39 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 		err   error
 	)
 
-	c.L.Info("connecting to local socket")
+	if c.ConnectTo != nil {
+		addr := fmt.Sprintf("[%s]:%d", c.ConnectTo.AddrIPv6.String(), c.ConnectTo.Port)
+		c.L.Info("connecting to bonjour located instance", "addr", addr)
 
-	for i := 0; i < 100; i++ {
-		if c.IsTerm {
-			fmt.Printf("🐚 Connecting...%s",
-				aec.EmptyBuilder.Column(0).ANSI.String(),
-			)
-		}
-		sconn, err = ssh.Dial("unix", c.Path, &cfg)
-		if err == nil {
-			break
+		sconn, err = ssh.Dial("tcp", addr, &cfg)
+
+		if err != nil {
+			addr := fmt.Sprintf("%s:%d", c.ConnectTo.AddrIPv4.String(), c.ConnectTo.Port)
+			c.L.Info("connecting to bonjour located instance", "addr", addr)
+
+			sconn, err = ssh.Dial("tcp", addr, &cfg)
 		}
 
-		c.L.Error("error connecting to unixsocket", "error", err)
-		time.Sleep(time.Second)
+		if err != nil {
+			return err
+		}
+	} else {
+		c.L.Info("connecting to local socket")
+
+		for i := 0; i < 100; i++ {
+			if c.IsTerm {
+				fmt.Printf("🐚 Connecting...%s",
+					aec.EmptyBuilder.Column(0).ANSI.String(),
+				)
+			}
+			sconn, err = ssh.Dial("unix", c.Path, &cfg)
+			if err == nil {
+				break
+			}
+
+			c.L.Error("error connecting to unixsocket", "error", err)
+			time.Sleep(time.Second)
+		}
 	}
 
 	sess, err := sconn.NewSession()
@@ -153,7 +189,7 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 		go io.Copy(os.Stderr, setup)
 		err = sess.Shell()
 	} else {
-		go io.Copy(ioutil.Discard, setup)
+		go io.Copy(io.Discard, setup)
 
 		c.L.Info("running command", "command", cmd)
 		err = sess.Start(cmd)

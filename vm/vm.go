@@ -40,6 +40,7 @@ type VM struct {
 	L        hclog.Logger
 	StateDir string
 	Config   Config
+	AuthKey  string
 
 	mu        sync.Mutex
 	listeners map[int]portListener
@@ -169,6 +170,8 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 		"user_name=" + u.Username,
 		"user_uid=" + u.Uid,
 		"user_gid=" + u.Gid,
+		"token=" + v.Config.Token,
+		"auth_key=" + v.AuthKey,
 	}
 
 	bootLoader := vz.NewLinuxBootLoader(
@@ -527,7 +530,7 @@ func (v *VM) startListener(
 	var l2 net.Listener
 
 	if v.Config.SSHPort > 0 {
-		l2, err = net.Listen("tcp", fmt.Sprintf("localhost:%d", v.Config.SSHPort))
+		l2, err = net.Listen("tcp", fmt.Sprintf(":%d", v.Config.SSHPort))
 		if err != nil {
 			v.L.Error("unable to start listing on explicit ssh port", "error", err)
 		} else {

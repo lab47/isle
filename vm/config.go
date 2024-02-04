@@ -2,6 +2,7 @@ package vm
 
 import (
 	"crypto/rand"
+	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,7 @@ type Config struct {
 	MacAddress string `json:"mac_address"`
 	ClusterId  string `json:"unique_id"`
 	SSHPort    int    `json:"ssh_port"`
+	Token      string `json:"token"`
 }
 
 func newUniqueId() string {
@@ -31,12 +33,20 @@ func newUniqueId() string {
 	return hex.EncodeToString(data)
 }
 
-func CheckConfig(log hclog.Logger, configPath string) error {
+func newToken() string {
+	data := make([]byte, 16)
+	io.ReadFull(rand.Reader, data)
+
+	return base32.StdEncoding.EncodeToString(data)
+}
+
+func CheckConfig(log hclog.Logger, configPath string) (*Config, error) {
+	var cfg Config
 	f, err := os.Open(configPath)
 	if err != nil {
 		f, err := os.Create(configPath)
 		if err != nil {
-			return fmt.Errorf("unable to create default config: %w", err)
+			return nil, fmt.Errorf("unable to create default config: %w", err)
 		}
 
 		enc := json.NewEncoder(f)
@@ -44,46 +54,47 @@ func CheckConfig(log hclog.Logger, configPath string) error {
 
 		mac := vz.NewRandomLocallyAdministeredMACAddress()
 
-		enc.Encode(Config{
+		cfg = Config{
 			Cores:      0,
 			DataSize:   "100G",
 			UserSize:   "100G",
 			MacAddress: mac.String(),
 			ClusterId:  newUniqueId(),
 			SSHPort:    4722,
-		})
+			Token:      newToken(),
+		}
+		enc.Encode(cfg)
 		f.Close()
 	} else {
 		defer f.Close()
 
-		var cfg Config
 		err = json.NewDecoder(f).Decode(&cfg)
 		if err != nil {
-			return fmt.Errorf("error parsing config: %w", err)
+			return nil, fmt.Errorf("error parsing config: %w", err)
 		}
 
 		if cfg.Memory != "" {
 			_, err := bytesize.Parse(cfg.Memory)
 			if err != nil {
-				return fmt.Errorf("invalid memory setting (%s): %w", cfg.Memory, err)
+				return nil, fmt.Errorf("invalid memory setting (%s): %w", cfg.Memory, err)
 			}
 		}
 
 		if cfg.Swap != "" {
 			_, err := bytesize.Parse(cfg.Swap)
 			if err != nil {
-				return fmt.Errorf("invalid swap setting (%s): %w", cfg.Swap, err)
+				return nil, fmt.Errorf("invalid swap setting (%s): %w", cfg.Swap, err)
 			}
 		}
 
 		_, err := bytesize.Parse(cfg.DataSize)
 		if err != nil {
-			return fmt.Errorf("invalid data size setting (%s): %w", cfg.DataSize, err)
+			return nil, fmt.Errorf("invalid data size setting (%s): %w", cfg.DataSize, err)
 		}
 
 		_, err = bytesize.Parse(cfg.UserSize)
 		if err != nil {
-			return fmt.Errorf("invalid data size setting (%s): %w", cfg.UserSize, err)
+			return nil, fmt.Errorf("invalid data size setting (%s): %w", cfg.UserSize, err)
 		}
 
 		var rewrite bool
@@ -93,20 +104,25 @@ func CheckConfig(log hclog.Logger, configPath string) error {
 			rewrite = true
 		}
 
+		if cfg.Token == "" {
+			cfg.Token = newToken()
+			rewrite = true
+		}
+
 		if rewrite {
 			of, err := os.Create(configPath)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			defer of.Close()
 
 			err = json.NewEncoder(of).Encode(&cfg)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 
-	return nil
+	return &cfg, nil
 }

@@ -2,12 +2,14 @@ package guest
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -66,6 +68,8 @@ type Guest struct {
 	User      string
 	ClusterId string
 	SubnetId  string
+	Token     string
+	AuthKey   string
 
 	v6clusterAddr net.IP
 	v6subnetAddr  net.IP
@@ -600,6 +604,24 @@ func (g *Guest) HandleSSH(ctx context.Context, c net.Conn) {
 		HostSigners: []ssh.Signer{signer},
 		Handler: func(s ssh.Session) {
 			g.handleSSH(ctx, s, g.currentSession)
+		},
+		PasswordHandler: func(ctx ssh.Context, password string) bool {
+			return password == g.Token
+		},
+		PublicKeyHandler: func(ctx ssh.Context, key ssh.PublicKey) bool {
+			if g.AuthKey == "" {
+				return false
+			}
+
+			data, err := base64.RawStdEncoding.DecodeString(g.AuthKey)
+			if err != nil {
+				g.L.Error("unable to decode auth_key", "error", err)
+				return false
+			}
+
+			g.L.Info("comparing keys for authentication")
+
+			return bytes.Equal(key.Marshal(), data)
 		},
 		ConnectionFailedCallback: func(conn net.Conn, err error) {
 			g.L.Error("failed to negotation ssh", "error", err)

@@ -95,6 +95,7 @@ require (
 	github.com/moby/locker v1.0.1 // indirect
 	github.com/moby/sys/mountinfo v0.6.0 // indirect
 	github.com/moby/sys/signal v0.6.0 // indirect
+	github.com/oleksandr/bonjour v0.0.0-20210301155756-30f43c61b915 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/runc v1.1.0 // indirect
 	github.com/opencontainers/selinux v1.10.0 // indirect
