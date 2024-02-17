@@ -50,6 +50,7 @@ var (
 	fList     = pflag.Bool("list-local", false, "list local isle instances")
 	fConnect  = pflag.StringP("connect", "L", "", "connect to an existing instance of the given cluster-id")
 	fToken    = pflag.String("token", "", "token to authenticate with existing remote instance")
+	fXVer     = pflag.String("x-version", "", "set the version explicitly")
 )
 
 func main() {
@@ -58,6 +59,10 @@ func main() {
 	if *fVersion {
 		fmt.Printf("isle version: %s\n", Version)
 		os.Exit(0)
+	}
+
+	if *fXVer != "" {
+		Version = *fXVer
 	}
 
 	if *fList {

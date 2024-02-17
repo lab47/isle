@@ -146,8 +146,17 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 		sess.Setenv("ISLE_CONSOLE", "1")
 	}
 
-	if lang := os.Getenv("LANG"); lang != "" {
-		sess.Setenv("LANG", lang)
+	forwardVars := []string{
+		"LANG",
+		"COLORTERM",
+		"TERM_PROGRAM",
+		"TERM_PROGRAM_VERSION",
+	}
+
+	for _, v := range forwardVars {
+		if val := os.Getenv(v); val != "" {
+			sess.Setenv(v, val)
+		}
 	}
 
 	rows, cols, err := pty.Getsize(os.Stdout)

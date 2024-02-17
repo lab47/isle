@@ -17,13 +17,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Code-Hex/vz/v3"
 	"github.com/fxamacker/cbor/v2"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
 	"github.com/lab47/isle/guestapi"
 	"github.com/lab47/isle/pkg/bytesize"
 	"github.com/lab47/isle/pkg/timesync"
-	"github.com/lab47/isle/pkg/vz"
 	"github.com/lab47/isle/types"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
@@ -52,7 +52,7 @@ type VM struct {
 	mountOnce sync.Once
 
 	currentSession *yamux.Session
-	memoryBalloon  *vz.VirtioMemoryBalloonDevice
+	memoryBalloon  *vz.VirtioTraditionalMemoryBalloonDeviceConfiguration
 	totalMemory    int64
 	currentMemory  int64
 }
@@ -174,19 +174,25 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 		"auth_key=" + v.AuthKey,
 	}
 
-	bootLoader := vz.NewLinuxBootLoader(
+	bootLoader, err := vz.NewLinuxBootLoader(
 		vmlinuz,
 		vz.WithCommandLine(strings.Join(kernelCommandLineArguments, " ")),
 		vz.WithInitrd(initrd),
 	)
+	if err != nil {
+		return err
+	}
 
 	v.L.Info("creating virtual machine", "cores", cores, "memory", mem)
 
-	config := vz.NewVirtualMachineConfiguration(
+	config, err := vz.NewVirtualMachineConfiguration(
 		bootLoader,
 		uint(cores),
 		uint64(memInBytes),
 	)
+	if err != nil {
+		return err
+	}
 
 	v.totalMemory = int64(memInBytes)
 	v.currentMemory = v.totalMemory
@@ -207,15 +213,31 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 	}
 
 	// console
-	serialPortAttachment := vz.NewFileHandleSerialPortAttachment(vmr, vmw)
-	consoleConfig := vz.NewVirtioConsoleDeviceSerialPortConfiguration(serialPortAttachment)
+	serialPortAttachment, err := vz.NewFileHandleSerialPortAttachment(vmr, vmw)
+	if err != nil {
+		return err
+	}
+
+	consoleConfig, err := vz.NewVirtioConsoleDeviceSerialPortConfiguration(serialPortAttachment)
+	if err != nil {
+		return err
+	}
+
 	config.SetSerialPortsVirtualMachineConfiguration([]*vz.VirtioConsoleDeviceSerialPortConfiguration{
 		consoleConfig,
 	})
 
 	// network
-	natAttachment := vz.NewNATNetworkDeviceAttachment()
-	networkConfig := vz.NewVirtioNetworkDeviceConfiguration(natAttachment)
+	natAttachment, err := vz.NewNATNetworkDeviceAttachment()
+	if err != nil {
+		return err
+	}
+
+	networkConfig, err := vz.NewVirtioNetworkDeviceConfiguration(natAttachment)
+	if err != nil {
+		return err
+	}
+
 	config.SetNetworkDevicesVirtualMachineConfiguration([]*vz.VirtioNetworkDeviceConfiguration{
 		networkConfig,
 	})
@@ -225,22 +247,37 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 		return err
 	}
 
-	networkConfig.SetMACAddress(vz.NewMACAddress(hw))
+	mac, err := vz.NewMACAddress(hw)
+	if err != nil {
+		return err
+	}
+
+	networkConfig.SetMACAddress(mac)
 
 	// entropy
-	entropyConfig := vz.NewVirtioEntropyDeviceConfiguration()
+	entropyConfig, err := vz.NewVirtioEntropyDeviceConfiguration()
+	if err != nil {
+		return err
+	}
 	config.SetEntropyDevicesVirtualMachineConfiguration([]*vz.VirtioEntropyDeviceConfiguration{
 		entropyConfig,
 	})
 
-	diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachment(
+	diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(
 		diskPath,
 		true,
+		vz.DiskImageCachingModeCached,
+		vz.DiskImageSynchronizationModeFsync,
 	)
 	if err != nil {
 		return err
 	}
-	storageDeviceConfig := vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment)
+
+	storageDeviceConfig, err := vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment)
+	if err != nil {
+		return err
+	}
+
 	storageConfigs := []vz.StorageDeviceConfiguration{
 		storageDeviceConfig,
 	}
@@ -293,8 +330,12 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 			log.Fatal(err)
 		}
 
-		storageConfigs = append(storageConfigs,
-			vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment))
+		bsc, err := vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment)
+		if err != nil {
+			return err
+		}
+
+		storageConfigs = append(storageConfigs, bsc)
 	}
 
 	if userPath != "" {
@@ -345,34 +386,56 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 			log.Fatal(err)
 		}
 
-		storageConfigs = append(storageConfigs,
-			vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment))
+		mc, err := vz.NewVirtioBlockDeviceConfiguration(diskImageAttachment)
+		if err != nil {
+			return err
+		}
+
+		storageConfigs = append(storageConfigs, mc)
 	}
 
 	config.SetStorageDevicesVirtualMachineConfiguration(storageConfigs)
 
+	tmb, err := vz.NewVirtioTraditionalMemoryBalloonDeviceConfiguration()
+	if err != nil {
+		return err
+	}
+
 	// traditional memory balloon device which allows for managing guest memory. (optional)
 	config.SetMemoryBalloonDevicesVirtualMachineConfiguration([]vz.MemoryBalloonDeviceConfiguration{
-		vz.NewVirtioTraditionalMemoryBalloonDeviceConfiguration(),
+		tmb,
 	})
 
 	if sharePath != "" {
-		fs := vz.NewVirtioFileSystemDeviceConfiguration("home")
+		fs, err := vz.NewVirtioFileSystemDeviceConfiguration("home")
+		if err != nil {
+			return err
+		}
 
-		fs.SetDirectoryShare(
-			vz.NewSingleDirectoryShare(
-				vz.NewSharedDirectory(sharePath, false),
-			),
-		)
+		dir, err := vz.NewSharedDirectory(sharePath, false)
+		if err != nil {
+			return err
+		}
+
+		share, err := vz.NewSingleDirectoryShare(dir)
+		if err != nil {
+			return err
+		}
+
+		fs.SetDirectoryShare(share)
 
 		config.SetDirectorySharingDevicesVirtualMachineConfiguration([]vz.DirectorySharingDeviceConfiguration{
 			fs,
 		})
 	}
 
+	sockConfig, err := vz.NewVirtioSocketDeviceConfiguration()
+	if err != nil {
+		return err
+	}
 	// socket device (optional)
 	config.SetSocketDevicesVirtualMachineConfiguration([]vz.SocketDeviceConfiguration{
-		vz.NewVirtioSocketDeviceConfiguration(),
+		sockConfig,
 	})
 	validated, err := config.Validate()
 	if err != nil {
@@ -383,19 +446,31 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 		return fmt.Errorf("VM config did not validate")
 	}
 
-	vm := vz.NewVirtualMachine(config)
+	vm, err := vz.NewVirtualMachine(config)
+	if err != nil {
+		return err
+	}
 
 	sock := vm.SocketDevices()[0]
 
-	v.memoryBalloon = vm.MemoryBalloonDevices()[0]
+	/*
+		v.memoryBalloon = vm.MemoryBalloonDevices()[0]
+	*/
 
 	errCh := make(chan error, 1)
 
-	vm.Start(func(err error) {
-		if err != nil {
-			errCh <- err
-		}
-	})
+	err = vm.Start()
+	if err != nil {
+		return err
+	}
+
+	/*
+		vm.Start(func(err error) {
+			if err != nil {
+				errCh <- err
+			}
+		})
+	*/
 
 	ctx, cancel := context.WithCancel(ctx)
 
@@ -470,17 +545,15 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 			tick.Reset(10 * time.Second)
 			shutdown = true
 		case newState := <-vm.StateChangedNotify():
-			v.L.Info("observed vm state", "state", newState)
+			v.L.Debug("observed vm state", "state", newState)
 
 			if newState == vz.VirtualMachineStateRunning {
 				v.L.Debug("start VM is running")
 
-				listener, err := v.startListener(ctx, ctrlC, sock)
+				_, err := v.startListener(ctx, ctrlC, sock)
 				if err != nil {
 					return err
 				}
-
-				sock.SetSocketListenerForPort(listener, 47)
 
 				v.runDNS(sock)
 
@@ -493,7 +566,7 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 				return nil
 			}
 		case err := <-errCh:
-			v.L.Info("error booting vm", "error", err)
+			v.L.Error("error booting vm", "error", err)
 			return err
 		}
 	}
@@ -581,7 +654,13 @@ func (v *VM) startListener(
 
 	var prevConn *vz.VirtioSocketConnection
 
-	listener := vz.NewVirtioSocketListener(func(conn *vz.VirtioSocketConnection, err error) {
+	listener, err := sock.Listen(47)
+	if err != nil {
+		return nil, err
+	}
+
+	go func() {
+		conn, err := listener.AcceptVirtioSocketConnection()
 		if err != nil {
 			return
 		}
@@ -597,7 +676,11 @@ func (v *VM) startListener(
 		cfg.AcceptBacklog = 10
 
 		sess, err := yamux.Client(conn, cfg)
-		v.L.Debug("connected yamux to guest")
+		if err != nil {
+			v.L.Error("error connect to yamux", "error", err)
+		} else {
+			v.L.Debug("connected yamux to guest")
+		}
 
 		v.mu.Lock()
 
@@ -616,35 +699,39 @@ func (v *VM) startListener(
 		}
 
 		return
-	})
+	}()
 
 	return listener, nil
 }
 
 func (v *VM) bridge(sock *vz.VirtioSocketDevice, c net.Conn) {
-	v.L.Info("starting ssh bridge")
+	v.L.Trace("starting ssh bridge")
 
-	sock.ConnectToPort(48, func(conn *vz.VirtioSocketConnection, err error) {
-		if err != nil {
-			v.L.Error("error connecting to port", "error", err)
-			c.Close()
-			return
-		}
+	conn, err := sock.Connect(48)
+	if err != nil {
+		v.L.Error("error connecting to port", "error", err)
+		c.Close()
+		return
+	}
+	if err != nil {
+		v.L.Error("error connecting to port", "error", err)
+		c.Close()
+		return
+	}
 
-		v.L.Info("bridging connection", "guest-port", 48)
+	v.L.Trace("bridging connection", "guest-port", 48)
 
-		go func() {
-			defer c.Close()
-			defer conn.Close()
-
-			io.Copy(conn, c)
-		}()
-
+	go func() {
 		defer c.Close()
 		defer conn.Close()
 
-		io.Copy(c, conn)
-	})
+		io.Copy(conn, c)
+	}()
+
+	defer c.Close()
+	defer conn.Close()
+
+	io.Copy(c, conn)
 }
 
 func (v *VM) standaloneBridge(ctx context.Context, sock *vz.VirtioSocketDevice, l net.Listener) {
@@ -755,26 +842,29 @@ func (v *VM) handleFromGuest(ctx context.Context, sess *yamux.Session) {
 
 		if prefix[0] == types.ProtocolByte {
 			r.Discard(1)
-			v.L.Info("handling custom protocol")
+			v.L.Trace("handling custom protocol")
 			go v.handleGuestConn(ic)
 		} else {
-			v.L.Info("handling http protocol")
+			v.L.Trace("handling http protocol")
 			httpListen <- ic
 		}
 	}
 }
 
 func (v *VM) TrimMemory(ctx context.Context, req *guestapi.TrimMemoryReq) (*guestapi.TrimMemoryResp, error) {
-	if req.Reset_ {
-		v.currentMemory = v.totalMemory
-		v.memoryBalloon.SetTargetVirtualMachineMemorySize(uint64(v.totalMemory))
-	} else if req.Set != 0 {
-		v.memoryBalloon.SetTargetVirtualMachineMemorySize(uint64(req.Set) * 1024 * 1024)
-	} else {
-		mem := v.currentMemory + (int64(req.Adjust) * 1024 * 1024)
-		v.currentMemory = v.currentMemory
-		v.memoryBalloon.SetTargetVirtualMachineMemorySize(uint64(mem))
-	}
+	return nil, nil
+	/*
+		if req.Reset_ {
+			v.currentMemory = v.totalMemory
+			v.memoryBalloon.SetTargetVirtualMachineMemorySize(uint64(v.totalMemory))
+		} else if req.Set != 0 {
+			v.memoryBalloon.SetTargetVirtualMachineMemorySize(uint64(req.Set) * 1024 * 1024)
+		} else {
+			mem := v.currentMemory + (int64(req.Adjust) * 1024 * 1024)
+			v.currentMemory = v.currentMemory
+			v.memoryBalloon.SetTargetVirtualMachineMemorySize(uint64(mem))
+		}
+	*/
 
 	return &guestapi.TrimMemoryResp{TotalMemory: int32(v.currentMemory)}, nil
 }
@@ -957,7 +1047,7 @@ func (v *VM) handleGuestConn(c net.Conn) {
 			return
 		}
 
-		v.L.Info("forwarding connection to ssh-agent", "path", path)
+		v.L.Trace("forwarding connection to ssh-agent", "path", path)
 
 		enc.Encode(types.ResponseMessage{
 			Code: types.OK,
@@ -969,7 +1059,7 @@ func (v *VM) handleGuestConn(c net.Conn) {
 
 			io.Copy(c, local)
 
-			v.L.Info("ssh-agent session ended 1")
+			v.L.Trace("ssh-agent session ended 1")
 		}()
 
 		defer c.Close()
@@ -977,7 +1067,7 @@ func (v *VM) handleGuestConn(c net.Conn) {
 
 		io.Copy(local, c)
 
-		v.L.Info("ssh-agent session ended 2")
+		v.L.Trace("ssh-agent session ended 2")
 	}
 }
 

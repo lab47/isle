@@ -240,6 +240,10 @@ func newVirtioSocketConnection(ptr unsafe.Pointer) *VirtioSocketConnection {
 	return conn
 }
 
+func (v *VirtioSocketConnection) File() *os.File {
+	return v.file
+}
+
 // Read reads data from connection of the vsock protocol.
 func (v *VirtioSocketConnection) Read(b []byte) (n int, err error) { return v.file.Read(b) }
 

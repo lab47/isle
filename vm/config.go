@@ -9,9 +9,9 @@ import (
 	"io"
 	"os"
 
+	"github.com/Code-Hex/vz/v3"
 	"github.com/hashicorp/go-hclog"
 	"github.com/lab47/isle/pkg/bytesize"
-	"github.com/lab47/isle/pkg/vz"
 )
 
 type Config struct {
@@ -52,7 +52,10 @@ func CheckConfig(log hclog.Logger, configPath string) (*Config, error) {
 		enc := json.NewEncoder(f)
 		enc.SetIndent("", "  ")
 
-		mac := vz.NewRandomLocallyAdministeredMACAddress()
+		mac, err := vz.NewRandomLocallyAdministeredMACAddress()
+		if err != nil {
+			return nil, err
+		}
 
 		cfg = Config{
 			Cores:      0,

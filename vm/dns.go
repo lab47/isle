@@ -5,9 +5,9 @@ import (
 	"net"
 	"sync"
 
+	"github.com/Code-Hex/vz/v3"
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
-	"github.com/lab47/isle/pkg/vz"
 	"github.com/miekg/dns"
 )
 
@@ -254,7 +254,13 @@ func (h *dnsHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 }
 
 func (v *VM) runDNS(sock *vz.VirtioSocketDevice) error {
-	listener := vz.NewVirtioSocketListener(func(conn *vz.VirtioSocketConnection, err error) {
+	listener, err := sock.Listen(53)
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		conn, err := listener.AcceptVirtioSocketConnection()
 		if err != nil {
 			return
 		}
@@ -275,9 +281,7 @@ func (v *VM) runDNS(sock *vz.VirtioSocketDevice) error {
 		}
 
 		srv.ActivateAndServe()
-	})
-
-	sock.SetSocketListenerForPort(listener, 53)
+	}()
 
 	v.L.Info("activated host dns")
 
