@@ -920,7 +920,13 @@ func (g *Guest) handleProtocol(conn net.Conn) {
 			return
 		}
 
-		c, err := net.Dial("tcp", fmt.Sprintf("%s:%d", pf.Key, pf.Port))
+		host := pf.Key
+
+		if strings.IndexByte(host, ':') >= 0 {
+			host = "[" + host + "]"
+		}
+
+		c, err := net.Dial("tcp", fmt.Sprintf("%s:%d", host, pf.Port))
 		if err != nil {
 			enc.Encode(types.ResponseMessage{
 				Code:  types.Error,
@@ -1090,7 +1096,7 @@ func (g *Guest) readPorts(ctx context.Context, sess *yamux.Session, target strin
 
 			delete(ports, p)
 
-			_, err = g.hostAPI().StartPortForward(ctx, &guestapi.StartPortForwardReq{
+			_, err = g.hostAPI().CancelPortForward(ctx, &guestapi.CancelPortForwardReq{
 				Port: int32(p),
 				Key:  target,
 			})
