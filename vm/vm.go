@@ -961,7 +961,7 @@ func (v *VM) Running(ctx context.Context, req *guestapi.RunningReq) (*guestapi.R
 func (v *VM) StartPortForward(ctx context.Context, req *guestapi.StartPortForwardReq) (*guestapi.StartPortForwardResp, error) {
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", req.Port))
 	if err != nil {
-		v.L.Error("unable to listen on port", "error", err)
+		v.L.Error("unable to listen on port", "error", err, "port", req.Port, "host", req.Key)
 		return nil, err
 	}
 
@@ -974,7 +974,7 @@ func (v *VM) StartPortForward(ctx context.Context, req *guestapi.StartPortForwar
 	cur := v.currentSession
 	v.mu.Unlock()
 
-	v.L.Debug("setup port forwarder", "port", req.Port)
+	v.L.Debug("setup port forwarder", "port", req.Port, "host", req.Key)
 	go v.forwardPort(int(req.Port), req.Key, l, cur)
 
 	return &guestapi.StartPortForwardResp{}, nil
@@ -1077,7 +1077,7 @@ func (v *VM) forwardPort(port int, key string, l net.Listener, sess *yamux.Sessi
 	for {
 		c, err := l.Accept()
 		if err != nil {
-			v.L.Error("error accepting new connections for forwarding", "error", err)
+			v.L.Debug("error accepting new connections for forwarding", "error", err)
 			return
 		}
 
