@@ -1,6 +1,6 @@
 
 if [ "$(uname -p)" = "aarch64" ]; then
-  kernel=https://github.com/lab47/isle-kernel/releases/download/v20231203/linux-6.6.3-arm64.tar.xz
+  kernel=https://github.com/lab47/isle-kernel/releases/download/v20240217/linux-6.6.15-arm64.tar.xz
   root=https://dl-cdn.alpinelinux.org/alpine/v3.15/releases/aarch64/alpine-minirootfs-3.15.2-aarch64.tar.gz
   initrd=https://github.com/lab47/isle-kernel/releases/download/v20220327/initrd-aarch64
 else
