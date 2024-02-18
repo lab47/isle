@@ -986,7 +986,7 @@ func (g *Guest) handleProtocol(conn net.Conn) {
 	}
 }
 
-func (g *Guest) monitorPorts(ctx context.Context, sess *yamux.Session, target, target6 string, path, pathv6 string) {
+func (g *Guest) monitorPorts(ctx context.Context, sess *yamux.Session, target, target6 string, pid int) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
@@ -1003,11 +1003,9 @@ func (g *Guest) monitorPorts(ctx context.Context, sess *yamux.Session, target, t
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			g.readPorts(ctx, sess, target, path, ports)
-			g.readPorts(ctx, sess, target6, pathv6, ports)
+			g.processPorts(ctx, sess, pid, target, target6, ports)
 		case <-sigCh:
-			g.readPorts(ctx, sess, target, path, ports)
-			g.readPorts(ctx, sess, target6, pathv6, ports)
+			g.processPorts(ctx, sess, pid, target, target6, ports)
 		}
 	}
 }
@@ -1017,6 +1015,121 @@ var bindLocals = map[string]struct{}{
 	"00000000000000000000000001000000": {},
 	"00000000":                         {},
 	"00000000000000000000000000000000": {},
+}
+
+func (g *Guest) gatherPorts(path string) ([]int64, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+
+	defer f.Close()
+
+	br := bufio.NewReader(f)
+
+	// discard header line
+	br.ReadString('\n')
+
+	var ret []int64
+
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			break
+		}
+
+		parts := strings.Fields(line)
+
+		local := parts[1]
+		remote := parts[2]
+
+		if remote != "00000000:0000" && remote != "00000000000000000000000000000000:0000" {
+			continue
+		}
+
+		colon := strings.IndexByte(local, ':')
+		if colon == -1 {
+			continue
+		}
+
+		port := local[colon+1:]
+
+		numPort, err := strconv.ParseInt(port, 16, 64)
+		if err != nil {
+			g.L.Error("error parsing port", "error", err, "port", port)
+			continue
+		}
+
+		ret = append(ret, numPort)
+	}
+
+	return ret, nil
+}
+
+func (g *Guest) processPorts(ctx context.Context, sess *yamux.Session, pid int, target, target6 string, ports map[int64]struct{}) {
+	path := fmt.Sprintf("/proc/%d/net/tcp", pid)
+	pathv6 := fmt.Sprintf("/proc/%d/net/tcp6", pid)
+
+	v4, err := g.gatherPorts(path)
+	if err != nil {
+		g.L.Error("error gathering v4 ports", "error", err)
+	}
+
+	v6, err := g.gatherPorts(pathv6)
+	if err != nil {
+		g.L.Error("error gathering v6 ports", "error", err)
+	}
+
+	curPorts := map[int64]struct{}{}
+
+	for _, ps := range []struct {
+		ports  []int64
+		target string
+	}{
+		{v4, target},
+		{v6, target6},
+	} {
+		for _, port := range ps.ports {
+			curPorts[port] = struct{}{}
+
+			if _, ok := ports[port]; ok {
+				continue
+			}
+
+			_, err = g.hostAPI().StartPortForward(ctx, &guestapi.StartPortForwardReq{
+				Port: int32(port),
+				Key:  target,
+			})
+
+			if err != nil {
+				g.L.Error("error setting up port forwarding", "error", err)
+				continue
+			}
+
+			g.L.Info("confirmed port being forwarded", "port", port)
+			ports[port] = struct{}{}
+		}
+	}
+
+	for port := range ports {
+		if _, ok := curPorts[port]; !ok {
+			// cancel the forwarder
+
+			delete(ports, port)
+
+			_, err = g.hostAPI().CancelPortForward(ctx, &guestapi.CancelPortForwardReq{
+				Port: int32(port),
+				Key:  target,
+			})
+
+			if err != nil {
+				g.L.Error("host reported error canceling port", "error", err)
+				continue
+			}
+
+			g.L.Info("canceled port forward with host", "port", port)
+		}
+	}
 }
 
 func (g *Guest) readPorts(ctx context.Context, sess *yamux.Session, target string, path string, ports map[int64]struct{}) {
@@ -1106,7 +1219,7 @@ func (g *Guest) readPorts(ctx context.Context, sess *yamux.Session, target strin
 				continue
 			}
 
-			g.L.Info("canceled port forward with host")
+			g.L.Info("canceled port forward with host", "port", p)
 		}
 	}
 }

@@ -756,7 +756,7 @@ func (g *Guest) bootContainer(
 		pathv6 := fmt.Sprintf("/proc/%d/net/tcp6", task.Pid())
 
 		g.L.Info("monitoring for ports", "path", path, "pathv6", pathv6, "target", target)
-		go g.monitorPorts(ctx, g.currentSession, target, target6, path, pathv6)
+		go g.monitorPorts(ctx, g.currentSession, target, target6, int(task.Pid()))
 	}
 
 	g.L.Warn("waiting for signal to stop container")
