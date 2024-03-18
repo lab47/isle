@@ -84,7 +84,7 @@ func main() {
 		for {
 			select {
 			case e := <-results:
-				fmt.Printf("%s @ %s\n  %s\n", e.Instance, e.HostName, strings.Join(e.Text, "\n  "))
+				fmt.Printf("%s @ %s (%s, %s)\n  %s\n", e.Instance, e.HostName, e.AddrIPv4, e.AddrIPv6, strings.Join(e.Text, "\n  "))
 			case <-t.C:
 				return
 			}
@@ -156,38 +156,46 @@ func main() {
 
 	connectTo := *fConnect
 
+	var (
+		ent   *bonjour.ServiceEntry
+		entIP string
+	)
+
 	if connectTo != "" {
-		fmt.Printf("Looking up isle in bonjour: %s\n", connectTo)
+		if strings.ContainsRune(connectTo, ':') {
+			fmt.Printf("Connecting to IP %s\n", connectTo)
+			entIP = connectTo
+		} else {
+			fmt.Printf("Looking up isle in bonjour: %s\n", connectTo)
 
-		r, err := bonjour.NewResolver(nil)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error creating bonjour resolver: %s\n", err)
-			os.Exit(1)
-		}
+			r, err := bonjour.NewResolver(nil)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error creating bonjour resolver: %s\n", err)
+				os.Exit(1)
+			}
 
-		results := make(chan *bonjour.ServiceEntry)
+			results := make(chan *bonjour.ServiceEntry)
 
-		err = r.Browse("_isle._tcp", "local.", results)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "Failed to browse:", err.Error())
-		}
+			err = r.Browse("_isle._tcp", "local.", results)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Failed to browse:", err.Error())
+			}
 
-		t := time.NewTimer(1 * time.Minute)
+			t := time.NewTimer(1 * time.Minute)
 
-		var ent *bonjour.ServiceEntry
+		loop:
+			for {
+				select {
+				case e := <-results:
+					if e.Instance == connectTo || e.HostName == connectTo {
+						ent = e
+						break loop
+					}
 
-	loop:
-		for {
-			select {
-			case e := <-results:
-				if e.Instance == connectTo || e.HostName == connectTo {
-					ent = e
-					break loop
+				case <-t.C:
+					fmt.Fprintf(os.Stderr, "Unable to locate any instance by the name '%s'\n", connectTo)
+					return
 				}
-
-			case <-t.C:
-				fmt.Fprintf(os.Stderr, "Unable to locate any instance by the name '%s'\n", connectTo)
-				return
 			}
 		}
 
@@ -199,6 +207,7 @@ func main() {
 			AsRoot:    *fRoot,
 			IsTerm:    isTerm,
 			ConnectTo: ent,
+			DirectIP:  entIP,
 			Token:     *fToken,
 		}
 

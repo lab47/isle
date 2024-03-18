@@ -33,6 +33,7 @@ type CLI struct {
 
 	LocalKey  []byte
 	ConnectTo *bonjour.ServiceEntry
+	DirectIP  string
 
 	L    hclog.Logger
 	Path string
@@ -64,7 +65,12 @@ func (c *CLI) Shell(cmd string, stdin io.Reader, stdout io.Writer) error {
 		err   error
 	)
 
-	if c.ConnectTo != nil {
+	if c.DirectIP != "" {
+		sconn, err = ssh.Dial("tcp", c.DirectIP, &cfg)
+		if err != nil {
+			return err
+		}
+	} else if c.ConnectTo != nil {
 		addr := fmt.Sprintf("[%s]:%d", c.ConnectTo.AddrIPv6.String(), c.ConnectTo.Port)
 		c.L.Info("connecting to bonjour located instance", "addr", addr)
 
