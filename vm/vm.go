@@ -322,9 +322,11 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 			f.Close()
 		}
 
-		diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachment(
+		diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(
 			dataPath,
 			false,
+			vz.DiskImageCachingModeCached,
+			vz.DiskImageSynchronizationModeFsync,
 		)
 		if err != nil {
 			log.Fatal(err)
@@ -378,9 +380,11 @@ func (v *VM) Run(ctx context.Context, stateCh chan State, sigC chan os.Signal) e
 			f.Close()
 		}
 
-		diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachment(
+		diskImageAttachment, err := vz.NewDiskImageStorageDeviceAttachmentWithCacheAndSync(
 			userPath,
 			false,
+			vz.DiskImageCachingModeCached,
+			vz.DiskImageSynchronizationModeFsync,
 		)
 		if err != nil {
 			log.Fatal(err)
