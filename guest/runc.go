@@ -441,7 +441,7 @@ func (g *Guest) bootContainer(
 			Args: []string{"/dev/init"},
 			Env: []string{
 				"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/opt/isle/bin",
-				"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
+				"SSH_AUTH_SOCK=/run/ssh-agent.sock",
 			},
 			Cwd: "/",
 			Capabilities: &specs.LinuxCapabilities{
@@ -567,7 +567,7 @@ func (g *Guest) bootContainer(
 				Options:     []string{"rbind", "ro"},
 			},
 			{
-				Destination: "/tmp/ssh-agent.sock",
+				Destination: "/run/ssh-agent.sock",
 				Type:        "bind",
 				Source:      g.sshAgentPath,
 				Options:     []string{"rbind", "rw"},

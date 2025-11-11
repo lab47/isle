@@ -34,7 +34,6 @@ import (
 	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/yamux"
 	"github.com/lab47/isle/guestapi"
-	"github.com/lab47/isle/network"
 	"github.com/lab47/isle/pkg/ssh"
 	"github.com/lab47/isle/pkg/timesync"
 	"github.com/lab47/isle/pkg/xuser"
@@ -102,6 +101,9 @@ type Guest struct {
 
 	usedIps    map[string]string
 	lastUsedIP string
+
+	hostMu   sync.Mutex
+	hostConn *grpc.ClientConn
 }
 
 func newUniqueId() string {
@@ -182,7 +184,7 @@ func (g *Guest) Init(ctx context.Context) error {
 		g.lastUsedIP: "_",
 	}
 
-	g.hostAddr = network.MetadataIP
+	g.hostAddr = "172.22.1.1"
 
 	ctx, cancel := context.WithCancel(ctx)
 	g.bgCtx = ctx
@@ -283,7 +285,7 @@ func (g *Guest) handleSSH(ctx context.Context, s ssh.Session, l *yamux.Session) 
 	sp := &specs.Process{
 		Env: []string{
 			"PATH=/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin:/usr/local/sbin:/run/share/bin:/run/share/sbin:/opt/isle/bin",
-			"SSH_AUTH_SOCK=/tmp/ssh-agent.sock",
+			"SSH_AUTH_SOCK=/run/ssh-agent.sock",
 		},
 	}
 
@@ -830,15 +832,26 @@ func (g *Guest) vmHttpClient() *http.Client {
 }
 
 func (g *Guest) hostAPI() guestapi.HostAPIClient {
-	conn, err := grpc.Dial("host:1",
-		grpc.WithDialer(func(s string, d time.Duration) (net.Conn, error) {
-			return g.currentSession.Open()
-		}),
-		grpc.WithInsecure(),
-	)
-	if err != nil {
-		panic(err)
+	g.hostMu.Lock()
+
+	conn := g.hostConn
+
+	if conn == nil {
+		var err error
+		conn, err = grpc.Dial("host:1",
+			grpc.WithDialer(func(s string, d time.Duration) (net.Conn, error) {
+				return g.currentSession.Open()
+			}),
+			grpc.WithInsecure(),
+		)
+		if err != nil {
+			panic(err)
+		}
+
+		g.hostConn = conn
 	}
+
+	g.hostMu.Unlock()
 
 	return guestapi.NewHostAPIClient(conn)
 }

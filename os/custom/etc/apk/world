@@ -2,8 +2,8 @@ alpine-baselayout
 alpine-keys
 apk-tools
 bash
+bpftool
 busybox
-busybox-initscripts
 ca-certificates
 cni-plugins
 containerd

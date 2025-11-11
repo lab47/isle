@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -16,6 +17,9 @@ import (
 	"github.com/lab47/isle/pkg/kcmdline"
 	"github.com/mdlayher/vsock"
 	"golang.org/x/sys/unix"
+
+	"net/http"
+	_ "net/http/pprof"
 )
 
 func main() {
@@ -23,6 +27,10 @@ func main() {
 		helper.Main(os.Args[2:])
 		return
 	}
+
+	go func() {
+		log.Println(http.ListenAndServe("0.0.0.0:6060", nil))
+	}()
 
 	// Be sure that when we turn on forwarding via cni, we don't also
 	// break the ipv6 info we get from the hypervisor
